@@ -1,4 +1,17 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+// Fonts are bundled with the app (no Google Fonts download), so they work offline and in the store apps.
+import '@fontsource/dm-sans/latin-400.css'
+import '@fontsource/dm-sans/latin-500.css'
+import '@fontsource/dm-sans/latin-600.css'
+import '@fontsource/dm-sans/latin-700.css'
+import '@fontsource/dm-serif-display/latin-400.css'
+import '@fontsource/oswald/latin-500.css'
+import '@fontsource/oswald/latin-600.css'
+import '@fontsource/oswald/latin-700.css'
+import '@fontsource/share-tech-mono/latin-400.css'
+import '@fontsource/barlow-condensed/latin-600.css'
+import '@fontsource/barlow-condensed/latin-700.css'
+import '@fontsource/barlow-condensed/latin-900.css'
 import App from './App.jsx'
 ReactDOM.createRoot(document.getElementById('root')).render(<App />)

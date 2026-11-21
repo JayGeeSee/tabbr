@@ -13,6 +13,7 @@ A loaded-march (tabbing) fitness tracker that installs on an iPhone as a home-sc
 | `package.json`, `package-lock.json` | The list of building blocks (packages) the app needs |
 | `vite.config.js` | Build settings, including offline support |
 | `.gitignore` | Tells GitHub which files to skip (hidden on a Mac — that's normal) |
+| `src/native.js` | Features only used by the iPhone/Android store apps |
 
 ## Getting it on your iPhone (no installs needed)
 
@@ -36,6 +37,34 @@ npm run dev      # opens a local preview at http://localhost:5173
 ```
 
 Press Ctrl + C to stop it.
+
+---
+
+## iPhone and Android store apps
+
+This folder also contains the native app projects, built with [Capacitor](https://capacitorjs.com):
+
+| Folder / file | What it is |
+|---|---|
+| `ios/` | The iPhone app project (open it in Xcode) |
+| `android/` | The Android app project (open it in Android Studio) |
+| `capacitor.config.json` | App name, app ID (`com.tabbr.fitness`) and native settings |
+| `src/native.js` | Phone-only features: background GPS, spoken cues, vibration, sharing, safer storage |
+| `assets/` | The source images the app icons and launch screens were made from |
+| `public/privacy.html` | The privacy policy page both stores require (add your contact email first) |
+
+In the store apps, GPS and voice cues keep working with the screen locked.
+
+Commands (in Terminal, inside this folder, after `npm install`):
+
+```bash
+npm run ios        # build the app and open it in Xcode
+npm run android    # build the app and open it in Android Studio
+```
+
+Run one of these again after every change to the code, before building in Xcode or Android Studio.
+
+The app ID `com.tabbr.fitness` can be changed before the app is first registered with Apple or Google, but not after. If you want a different one, change it in `capacitor.config.json`, Xcode (Signing & Capabilities → Bundle Identifier) and `android/app/build.gradle` (applicationId).
 
 ---
 

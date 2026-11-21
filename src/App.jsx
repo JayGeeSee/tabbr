@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import { isNative, platform, startNativeGps, stopNativeGps, openLocationSettings, speakNative, celebrate, shareFile, prefs, setStatusBar } from "./native.js";
 import {
   House, Footprints, NotebookPen, Trophy, Menu, Play, Pause, RotateCcw, Check, Flame, Satellite, PenLine,
   CalendarDays, Lightbulb, Settings, Target, Medal, Mountain, Dumbbell, Zap, Map, Share2, Download, Upload,
@@ -8,16 +9,22 @@ import {
   Hourglass, Gauge, Route, Activity, Heater, Snowflake, CloudRain, Wind, Sun, CloudFog, BicepsFlexed,
   Brain, Utensils, Bandage, Shovel, CircleCheck, Moon, TriangleAlert, Siren, TrendingUp, Flag,
   CalendarCheck, Scale, Calculator, Plus, Award, Timer as TimerIcon, ClipboardList,
-  Volume2, VolumeX, MapPinned, Clock,
+  Volume2, VolumeX, MapPinned, Clock, Rabbit, Anchor, Layers, Repeat,
 } from "lucide-react";
 
-// ─── STORAGE HELPERS (localStorage — persistent, device-local) ────────────────
+// ─── STORAGE HELPERS (device-local) ──────────────────────────────────────────
+// Web: localStorage. Store apps: localStorage plus the app's own Preferences storage as a
+// safety copy, because a phone can clear web-view storage when it runs low on space.
 const store = {
   async get(key) {
-    try { return localStorage.getItem(key); } catch { return null; }
+    let v = null;
+    try { v = localStorage.getItem(key); } catch {}
+    if (v === null && isNative) { v = await prefs.get(key); if (v !== null) { try { localStorage.setItem(key, v); } catch {} } }
+    return v;
   },
   async set(key, val) {
     try { localStorage.setItem(key, val); } catch { /* storage full or blocked */ }
+    if (isNative) prefs.set(key, val);
   },
 };
 
@@ -230,6 +237,13 @@ const RANKS = [
   },
 ];
 
+// ─── SESSION TYPES ───────────────────────────────────────────────────────────
+// Every session is a "tab" (loaded march) or a "run". Older sessions have no type: they're tabs.
+const isRun = l => l.type === "run";
+const tabsOf = s => s.filter(l => !isRun(l));
+const runsOf = s => s.filter(isRun);
+const paceOf = l => (parseFloat(l.distance)||0) > 0 ? (parseFloat(l.time)||0) / parseFloat(l.distance) : Infinity;   // min per km
+
 // ─── BADGES ───────────────────────────────────────────────────────────────────
 const ALL_BADGES = [
   { id: "bergen_bear",    category: "Weight",      icon: Backpack, title: "Bergen Bear",        desc: "First tab with 10kg+",              check: s => s.some(l => l.bergenKg >= 10) },
@@ -237,19 +251,26 @@ const ALL_BADGES = [
   { id: "maverick",       category: "Weight",      icon: Swords, title: "Maverick",            desc: "Tab with 25kg+",                    check: s => s.some(l => l.bergenKg >= 25) },
   { id: "warrior",        category: "Weight",      icon: Award, title: "Warrior",             desc: "Tab with 30kg+",                    check: s => s.some(l => l.bergenKg >= 30) },
   { id: "hercules",       category: "Weight",      icon: Dumbbell, title: "Hercules",            desc: "Tab with 35kg+",                    check: s => s.some(l => l.bergenKg >= 35) },
-  { id: "first_step",     category: "Distance",    icon: Footprints, title: "First Step",          desc: "Complete your first tab",           check: s => s.length >= 1 },
-  { id: "trooper_5k",     category: "Distance",    icon: Flag, title: "5km Trooper",         desc: "Tab 5km in a single session",       check: s => s.some(l => l.distance >= 5) },
-  { id: "route_march",    category: "Distance",    icon: Map, title: "Route Marcher",       desc: "Tab 10km in a single session",      check: s => s.some(l => l.distance >= 10) },
-  { id: "half_marathon",  category: "Distance",    icon: Medal, title: "Half Marathon",       desc: "Tab 21km in a single session",      check: s => s.some(l => l.distance >= 21) },
-  { id: "centurion",      category: "Distance",    icon: Trophy, title: "Centurion",           desc: "100km total logged distance",       check: s => s.reduce((a,l)=>a+parseFloat(l.distance||0),0) >= 100 },
-  { id: "cold_aggression",category: "Performance", icon: Snowflake, title: "Cold Aggression",     desc: "Improve pace 3 sessions in a row",  check: s => checkPaceStreak(s,3) },
-  { id: "inf_standard",   category: "Performance", icon: Crosshair, title: "Eight-Miler",         desc: "12.9km (8 miles) with 25kg+ — the infantry Annual Fitness Test distance and load", check: s => s.some(l => l.distance>=12.8 && l.bergenKg>=25) },
+  { id: "first_step",     category: "Distance",    icon: Footprints, title: "First Step",          desc: "Complete your first tab",           check: s => tabsOf(s).length >= 1 },
+  { id: "trooper_5k",     category: "Distance",    icon: Flag, title: "5km Trooper",         desc: "Tab 5km in a single session",       check: s => tabsOf(s).some(l => l.distance >= 5) },
+  { id: "route_march",    category: "Distance",    icon: Map, title: "Route Marcher",       desc: "Tab 10km in a single session",      check: s => tabsOf(s).some(l => l.distance >= 10) },
+  { id: "half_marathon",  category: "Distance",    icon: Medal, title: "Half Marathon",       desc: "Tab 21km in a single session",      check: s => tabsOf(s).some(l => l.distance >= 21) },
+  { id: "centurion",      category: "Distance",    icon: Trophy, title: "Centurion",           desc: "100km total tabbed",                check: s => tabsOf(s).reduce((a,l)=>a+parseFloat(l.distance||0),0) >= 100 },
+  { id: "cold_aggression",category: "Performance", icon: Snowflake, title: "Cold Aggression",     desc: "Improve your pace 3 tabs in a row",  check: s => checkPaceStreak(tabsOf(s),3) },
+  { id: "inf_standard",   category: "Performance", icon: Crosshair, title: "Eight-Miler",         desc: "12.9km (8 miles) with 25kg+ — the infantry Annual Fitness Test distance and load", check: s => tabsOf(s).some(l => l.distance>=12.8 && l.bergenKg>=25) },
   { id: "speed_demon",    category: "Performance", icon: Gauge, title: "Speed Demon",          desc: "Pace under 8 min/km with 15kg+",   check: s => s.some(l => l.bergenKg>=15 && (l.time/l.distance)<8) },
   { id: "streak_3",       category: "Consistency", icon: Activity, title: "On Fire",             desc: "3 sessions logged",                 check: s => s.length >= 3 },
   { id: "streak_10",      category: "Consistency", icon: BicepsFlexed, title: "No Quit",             desc: "10 sessions logged",                check: s => s.length >= 10 },
   { id: "streak_25",      category: "Consistency", icon: CalendarCheck, title: "Month of Discipline", desc: "25 sessions logged",                check: s => s.length >= 25 },
-  { id: "furnace",        category: "Calorie",     icon: Heater, title: "Human Furnace",       desc: "Burn 1,000 kcal in a single tab",   check: s => s.some(l => (l.calories||0) >= 1000) },
+  { id: "furnace",        category: "Calorie",     icon: Heater, title: "Human Furnace",       desc: "Burn 1,000 kcal in one session",    check: s => s.some(l => (l.calories||0) >= 1000) },
   { id: "ten_k_cals",     category: "Calorie",     icon: Flame, title: "Inferno",             desc: "Burn 10,000 kcal total",            check: s => s.reduce((a,l)=>a+(l.calories||0),0) >= 10000 },
+  { id: "first_run",      category: "Running",     icon: Rabbit, title: "Off the Mark",        desc: "Log your first run",                check: s => runsOf(s).length >= 1 },
+  { id: "run_5k",         category: "Running",     icon: Flag, title: "5K Runner",           desc: "Run 5km in a single session",       check: s => runsOf(s).some(l => l.distance >= 5) },
+  { id: "run_10k",        category: "Running",     icon: Route, title: "10K Runner",          desc: "Run 10km in a single session",      check: s => runsOf(s).some(l => l.distance >= 10) },
+  { id: "sub25_5k",       category: "Running",     icon: Gauge, title: "Sub-25 5K",           desc: "Run 5km+ at 5:00 min/km or faster", check: s => runsOf(s).some(l => l.distance >= 5 && paceOf(l) <= 5) },
+  { id: "sub9_2k",        category: "Running",     icon: Zap, title: "Sub-9 2K",            desc: "Run 2km+ at 4:30 min/km or faster", check: s => runsOf(s).some(l => l.distance >= 2 && paceOf(l) <= 4.5) },
+  { id: "run_50",         category: "Running",     icon: Trophy, title: "Run Club",            desc: "50km total run",                    check: s => runsOf(s).reduce((a,l)=>a+(parseFloat(l.distance)||0),0) >= 50 },
+  { id: "brick",          category: "Running",     icon: Layers, title: "Brick Session",       desc: "A run and a tab on the same day",   check: s => runsOf(s).some(r => tabsOf(s).some(t => t.date === r.date)) },
 ];
 
 function checkPaceStreak(logs, n) {
@@ -266,6 +287,12 @@ function checkPaceStreak(logs, n) {
 // ─── XP ───────────────────────────────────────────────────────────────────────
 function calcSessionXP(log) {
   const dist = parseFloat(log.distance)||0, time = parseFloat(log.time)||0;
+  if (isRun(log)) {   // runs: distance plus a bonus for pace
+    let xp = dist * 10;
+    if (dist > 0 && time > 0) { const pace = time / dist; xp += pace < 4.5 ? 50 : pace < 5 ? 35 : pace < 6 ? 20 : 0; }
+    if ((log.calories||0) > 800) xp += 40;
+    return Math.round(xp);
+  }
   let xp = dist * 10 + (parseFloat(log.bergenKg)||0) * 3;
   if (dist > 0 && time > 0) {
     const pace = time / dist;
@@ -283,23 +310,30 @@ const MISSIONS = [
   { id:"advance",   title:"Advance to Contact",  icon:Crosshair, desc:"Tab 5km with at least 12kg bergen",              xpReward:120, check:l=>l.some(x=>x.distance>=5&&x.bergenKg>=12) },
   { id:"battle",    title:"Battle Prep",          icon:Shield, desc:"Complete a steady 8km load march with 10kg+",    xpReward:150, check:l=>l.some(x=>x.distance>=8&&x.bergenKg>=10) },
   { id:"extract",   title:"Extraction",           icon:Helicopter, desc:"Tab 3km with 20kg+ (short but heavy)",           xpReward:100, check:l=>l.some(x=>x.distance>=3&&x.bergenKg>=20) },
-  { id:"recce",     title:"Recce Patrol",         icon:Binoculars, desc:"Tab 12km with light load (8kg or less)",         xpReward:130, check:l=>l.some(x=>x.distance>=12&&x.bergenKg<=8) },
+  { id:"recce",     title:"Recce Patrol",         icon:Binoculars, desc:"Tab 12km with light load (8kg or less)",         xpReward:130, check:l=>tabsOf(l).some(x=>x.distance>=12&&x.bergenKg<=8) },
   { id:"inf10",     title:"The 10-Miler",         icon:Medal, desc:"Tab 16km (10 miles) with 17kg+ in under 2 hours", xpReward:300, check:l=>l.some(x=>x.distance>=16&&x.bergenKg>=17&&x.time<=120) },
   { id:"ironwill",  title:"Iron Will",            icon:Swords, desc:"Tab 10km with 25kg+",                           xpReward:250, check:l=>l.some(x=>x.distance>=10&&x.bergenKg>=25) },
   { id:"dawn",      title:"Dawn Raid",            icon:Sunrise, desc:"Log 5 sessions total",                          xpReward:80, check:l=>l.length>=5 },
-  { id:"endurance", title:"Endurance Op",         icon:Hourglass, desc:"Accumulate 50km total distance",                xpReward:200, check:l=>l.reduce((a,x)=>a+parseFloat(x.distance||0),0)>=50 },
+  { id:"endurance", title:"Endurance Op",         icon:Hourglass, desc:"Tab a total of 50km",                           xpReward:200, check:l=>tabsOf(l).reduce((a,x)=>a+parseFloat(x.distance||0),0)>=50 },
+  { id:"qrf",       title:"Quick Reaction Force",  icon:Zap, desc:"Run 2km in under 10 minutes",                   xpReward:120, check:l=>runsOf(l).some(x=>x.distance>=2&&paceOf(x)<=5) },
+  { id:"commando",  title:"Commando Pace",         icon:Anchor, desc:"Run 2.4km in under 10 minutes — the Royal Marines second-run standard", xpReward:220, check:l=>runsOf(l).some(x=>x.distance>=2.4&&paceOf(x)*2.4<=10) },
+  { id:"patrol5",   title:"Perimeter Patrol",      icon:Flag, desc:"Run 5km in a single session",                   xpReward:100, check:l=>runsOf(l).some(x=>x.distance>=5) },
+  { id:"longreach", title:"Long Reach",            icon:Route, desc:"Run 10km in a single session",                  xpReward:180, check:l=>runsOf(l).some(x=>x.distance>=10) },
+  { id:"combined",  title:"Combined Arms",         icon:Layers, desc:"3 runs and 2 tabs in the same week (Mon–Sun)",  xpReward:200, check:l=>Object.values(groupBy(l, x=>weekKey(x.date))).some(w=>runsOf(w).length>=3&&tabsOf(w).length>=2) },
 ];
 
 // Challenge checks receive ONLY the logs from that day / that week.
 const DAILY_CHALLENGES = [
   { id:"d1", title:"Quick March",  desc:"Tab 2km with at least 8kg today",   xp:30, check:dayLogs=>dayLogs.some(l=>l.distance>=2&&l.bergenKg>=8) },
   { id:"d2", title:"Load Carry",   desc:"Tab any distance with 15kg+ today", xp:40, check:dayLogs=>dayLogs.some(l=>l.bergenKg>=15) },
-  { id:"d3", title:"5k Push",      desc:"Tab 5km today",                     xp:50, check:dayLogs=>dayLogs.some(l=>l.distance>=5) },
+  { id:"d3", title:"5k Push",      desc:"Tab 5km today",                     xp:50, check:dayLogs=>tabsOf(dayLogs).some(l=>l.distance>=5) },
+  { id:"d4", title:"Leg Turnover", desc:"Run 3km today",                     xp:30, check:dayLogs=>runsOf(dayLogs).some(l=>l.distance>=3) },
 ];
 const WEEKLY_CHALLENGES = [
-  { id:"w1", title:"3 Sessions",  desc:"Complete 3 tabs this week (Mon–Sun)",    xp:80,  check:weekLogs=>weekLogs.length>=3 },
+  { id:"w1", title:"3 Sessions",  desc:"Complete 3 sessions this week (Mon–Sun)", xp:80, check:weekLogs=>weekLogs.length>=3 },
   { id:"w2", title:"Load Up",     desc:"Tab with 12kg+ at least once this week", xp:60,  check:weekLogs=>weekLogs.some(l=>l.bergenKg>=12) },
-  { id:"w3", title:"20km Week",   desc:"Accumulate 20km this week",              xp:100, check:weekLogs=>weekLogs.reduce((a,l)=>a+(parseFloat(l.distance)||0),0)>=20 },
+  { id:"w3", title:"20km Week",   desc:"Tab or run 20km in total this week",     xp:100, check:weekLogs=>weekLogs.reduce((a,l)=>a+(parseFloat(l.distance)||0),0)>=20 },
+  { id:"w4", title:"Run Club",    desc:"Run 10km in total this week",            xp:70,  check:weekLogs=>runsOf(weekLogs).reduce((a,l)=>a+(parseFloat(l.distance)||0),0)>=10 },
 ];
 
 // ─── DATES ───────────────────────────────────────────────────────────────────
@@ -408,13 +442,60 @@ const TESTS = {
   rm9: { name:"Royal Marines 9-Mile Speed March", short:"RM 9-Miler", official:true, D:14.5, L:19, T:90,
     desc:"9 miles (14.5km) in fighting order (about 32lb / 14.5kg) plus rifle, in 90 minutes. This programme trains at 19kg to cover the rifle.",
     testNote:"Test: 9 miles (14.5km) at 19kg in under 90 min." },
+  // ── Running tests ──
+  army_2k: { kind:"run", name:"Army 2km Run", short:"Army 2km Run", official:true, D:2, L:0, longMax:6,
+    T:{ beginner:11.25, intermediate:10, advanced:8.25 },
+    desc:"The Army's run test: an 800m warm-up, then 2km on a flat course as fast as you can. The lowest entry standard has been reported as 11:15; many roles, including infantry, ask for faster. Each level aims for a different time: beginner 11:15, intermediate 10:00, advanced 8:15. Check your role's page for its exact standard.",
+    testNote:"Test: 800m easy warm-up, then 2km flat out." },
+  rm_pjft: { kind:"run", name:"Royal Marines Pre-Joining Runs", short:"RM PJFT Runs", official:true, D:2.4, L:0, longMax:6, T:10,
+    desc:"Two 2.4km treadmill runs at a 2% incline: the first in under 12:30, then after a one-minute rest the second in under 10:00. Every level trains for the 10:00 run; the levels change where you start.",
+    testNote:"Test: 2.4km under 12:30, rest 1 minute, then 2.4km under 10:00 (treadmill at 2% if you can)." },
+  run5k: { kind:"run", name:"TABBR 5K", short:"5K", official:false, D:5, L:0, longMax:10,
+    T:{ beginner:30, intermediate:25, advanced:21 },
+    desc:"TABBR's own running goal: 5km, aiming for 30:00 (beginner), 25:00 (intermediate) or 21:00 (advanced). Not an official test.",
+    testNote:"5K time trial — run it as hard as you can hold." },
 };
+const testTarget = (t, level) => typeof t.T === "object" ? t.T[level] : t.T;   // minutes
 const LEVEL_INFO = {
   beginner:     { label:"Beginner",     load:0.40, dist:0.45, pace:1.35 },
   intermediate: { label:"Intermediate", load:0.60, dist:0.60, pace:1.20 },
   advanced:     { label:"Advanced",     load:0.78, dist:0.75, pace:1.10 },
 };
 const r05 = x => Math.max(2, Math.round(x*2)/2);   // distances to the nearest 0.5km, never under 2km
+
+// Running plan: intervals (speed), tempo (threshold) and an easy long run each week, same 8-week shape.
+function generateRunProgramme(testId, level) {
+  const t = TESTS[testId], lv = LEVEL_INFO[level];
+  const P = testTarget(t, level) / t.D;                       // target race pace, min/km
+  const Ps = P * (1 + (lv.pace - 1) * 0.8);                  // starting pace a little slower
+  const LD = t.longMax, LDs = Math.max(2, LD * lv.dist);
+  const fmtP = p => mmss(p*60);
+  const F = [0, 0.15, 0.30, null, 0.45, 0.65, 0.85, null];
+  const run = (day, distance, pace, type, notes) => ({ day, distance, weight:0, kind:"run", targetTime:Math.round(distance*pace*10)/10, type, notes });
+  const shortTest = t.D <= 3;
+  return F.map((f, wi) => {
+    const week = wi + 1;
+    if (wi === 7) return { week, sessions:[
+      run("Mon", r05(LD*0.4), P*1.35, "Taper", `Easy run with 4 × 100m strides at test pace (${fmtP(P)}/km). Keep it short.`),
+      run("Wed", 2, P*1.4, "Taper", "Very easy 2km. Sort your kit and route for test day."),
+      run("Sat", t.D, P, "TEST", t.testNote),
+    ]};
+    if (f === null) return { week, sessions:[
+      run("Mon", r05(LDs*0.6), Ps*1.35, "Recovery", "Deload week — easy pace only, so your body adapts."),
+      run("Wed", 2, Ps*1.35, "Recovery", "Easy 2km. Finish feeling fresh."),
+      run("Sat", r05(LDs*0.9), Ps*1.35, "Recovery", "Easy longer run at conversation pace."),
+    ]};
+    const pace = Ps + (P - Ps) * f;
+    const reps = shortTest ? 4 + Math.round(f*4) : 3 + Math.round(f*3);
+    const repLen = shortTest ? 400 : 1000;
+    const intervalKm = r05(2 + reps*repLen/1000);
+    return { week, sessions:[
+      run("Mon", intervalKm, pace*1.15, "Intervals", `${reps} × ${repLen}m at ${fmtP(P*(1.04-0.07*f))}/km, with ${shortTest?"90 seconds":"2 minutes"} walk or jog between. Easy 1km before and after.`),
+      run("Wed", r05(Math.max(t.D, LD*0.4)), pace*1.1, "Tempo", `Steady and comfortably hard at about ${fmtP(pace*1.1)}/km: you could say a few words, not hold a conversation.`),
+      run("Sat", r05(LDs + (LD-LDs)*f), pace*1.3, "Long run", "Easy long run at conversation pace. Building your engine matters more than speed here."),
+    ]};
+  });
+}
 
 // Builds an 8-week, 3-sessions-a-week plan: build, build, build, deload, build, build, peak, taper + test.
 function generateProgramme(testId, level) {
@@ -459,10 +540,12 @@ function getProgramme(test="tabbr10", level="beginner") {
   if (!TESTS[test]) test = "tabbr10";
   if (!LEVEL_INFO[level]) level = "beginner";
   const id = progIdOf(test, level);
+  const t = TESTS[test];
   if (!programmeCache[id]) programmeCache[id] = {
-    id, test, level, name:TESTS[test].name, short:TESTS[test].short,
+    id, test, level, name:t.name, short:t.short, kind:t.kind||"tab", D:t.D, L:t.L, T:testTarget(t, level),
     // The original hand-written plan stays as the beginner 10-miler.
-    weeks: test==="tabbr10" && level==="beginner" ? PROGRAMME : generateProgramme(test, level),
+    weeks: t.kind==="run" ? generateRunProgramme(test, level)
+         : test==="tabbr10" && level==="beginner" ? PROGRAMME : generateProgramme(test, level),
   };
   return programmeCache[id];
 }
@@ -486,9 +569,28 @@ const FINISH  = [[BicepsFlexed,"Strong"],[CircleCheck,"Solid"],[Shovel,"Dug in"]
 const EFFORT_COLS = ["#5FAF62","#8CB43A","#E59A2B","#E8663F","#C0392B"];
 
 // ─── UTILITIES ───────────────────────────────────────────────────────────────
-function calcCalories(bw, bergen, dist, mins) {
+function calcCalories(bw, bergen, dist, mins, type="tab") {
   if (!bw || !dist || !mins || bw <= 0) return null;
-  return Math.round(6.0 * (1 + (bergen / bw) * 0.6) * bw * (mins / 60));
+  if (type === "run") {
+    // ACSM running equation: oxygen use (ml/kg/min) = 0.2 × speed (m/min) + 3.5; about 5 kcal per litre of oxygen.
+    // Below jogging speed (100 m/min) the walking equation (0.1 × speed + 3.5) applies; between 100 and 134 m/min blend the two.
+    const speed = (dist * 1000) / mins;
+    const runVO2 = 0.2 * speed + 3.5, walkVO2 = 0.1 * speed + 3.5;
+    const w = Math.min(1, Math.max(0, (speed - 100) / 34));
+    return Math.round((walkVO2 + (runVO2 - walkVO2) * w) * bw / 1000 * 5 * mins);
+  }
+  return Math.round(6.0 * (1 + ((bergen||0) / bw) * 0.6) * bw * (mins / 60));
+}
+// Accepts "105" (minutes), "24:30" (mm:ss) or "1:45:00" (h:mm:ss); returns minutes, or 0 if unreadable.
+function parseDuration(str) {
+  const t = String(str||"").trim(); if (!t) return 0;
+  if (!t.includes(":")) return /^\d+(\.\d+)?$/.test(t) && +t > 0 ? +t : 0;
+  const parts = t.split(":");
+  if (parts.length > 3 || parts.some(x => !/^\d+(\.\d+)?$/.test(x))) return 0;
+  const nums = parts.map(Number);
+  if (nums.slice(1).some(x => x >= 60)) return 0;   // seconds and minutes after a colon must be under 60
+  const [h, m, sec] = nums.length === 3 ? nums : [0, ...nums];
+  return h*60 + m + (sec||0)/60;
 }
 
 // Everything is STORED in km / kg / minutes. These helpers only change what the user
@@ -505,8 +607,9 @@ function makeUnits(units) {
     distNum: (km, dp=2) => +(imp ? (parseFloat(km)||0)*KM_TO_MI : (parseFloat(km)||0)).toFixed(dp),
     toKm:  v => imp ? (parseFloat(v)||0)/KM_TO_MI : (parseFloat(v)||0),
     wt:    kg => imp ? `${Math.round((parseFloat(kg)||0)*KG_TO_LB)} lb` : `${trim(kg)} kg`,
+    // Pace as minutes:seconds (4:54 /km), the way runners and tabbers read it.
     pace:  minPerKm => (!isFinite(minPerKm) || minPerKm <= 0) ? "--"
-                        : `${(imp ? minPerKm/KM_TO_MI : minPerKm).toFixed(1)} min/${imp ? "mi" : "km"}`,
+                        : `${mmss((imp ? minPerKm/KM_TO_MI : minPerKm)*60)} /${imp ? "mi" : "km"}`,
   };
 }
 
@@ -549,6 +652,7 @@ const mmss = sec => { sec = Math.max(0, Math.round(sec)); const h=Math.floor(sec
 const spoken = sec => { sec = Math.max(0, Math.round(sec)); const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), x=sec%60;
   return [h && `${h} hour${h>1?"s":""}`, m && `${m} minute${m>1?"s":""}`, (x || (!h && !m)) && `${x} second${x===1?"":"s"}`].filter(Boolean).join(" "); };
 function say(text) {
+  if (isNative) { speakNative(text); return; }   // native speech keeps working with the screen locked
   try { if (!("speechSynthesis" in window)) return; const u = new SpeechSynthesisUtterance(text); u.lang = "en-GB"; u.rate = 1; window.speechSynthesis.speak(u); } catch {}
 }
 
@@ -574,7 +678,7 @@ function RouteMap({ route, T, height=240 }) {
 }
 
 // ─── SUB-COMPONENTS ──────────────────────────────────────────────────────────
-function WeightStepper({ value, onChange, min=1, max=45, label, T, s, u }) {
+function WeightStepper({ value, onChange, min=0, max=45, label, T, s, u }) {
   return (
     <div>
       <label style={s.label}>{label}</label>
@@ -647,17 +751,19 @@ function XPBar({ xp, T }) {
   );
 }
 
-function CalcWidget({ T, s, u, userBodyWeight }) {
+function CalcWidget({ T, s, u, userBodyWeight, seg }) {
+  const [kind,setKind]=useState("tab");
   const [dist,setDist]=useState(10); const [time,setTime]=useState(120); const [bergen,setBergen]=useState(17);
-  const bw=parseFloat(userBodyWeight); const cals=calcCalories(bw,bergen,dist,time);
+  const bw=parseFloat(userBodyWeight); const cals=calcCalories(bw,kind==="run"?0:bergen,dist,time,kind);
   const dc = distConv(u.imp);
   return (
     <div>
+      {seg([["tab","Tab"],["run","Run"]], kind, k=>{ setKind(k); if (k==="run" && time===120) setTime(55); if (k==="tab" && time===55) setTime(120); })}
       <div style={s.formGrid}>
         <div><label style={s.label}>Distance ({u.dUnit})</label><UnitInput style={s.input} valueMetric={dist} onChangeMetric={v=>setDist(parseFloat(v)||0)} {...dc}/></div>
         <div><label style={s.label}>Duration (minutes)</label><input style={s.input} type="number" inputMode="numeric" value={time} onChange={e=>setTime(parseFloat(e.target.value)||0)}/></div>
       </div>
-      <div style={{ marginBottom:"14px" }}><WeightStepper value={bergen} onChange={setBergen} label="Bergen weight" T={T} s={s} u={u}/></div>
+      {kind==="tab" && <div style={{ marginBottom:"14px" }}><WeightStepper value={bergen} onChange={setBergen} label="Bergen weight" T={T} s={s} u={u}/></div>}
       {!bw ? <div style={{ padding:"10px", background:T.surfaceAlt, borderRadius:"8px", color:T.textMuted, fontSize:"0.82rem" }}>Enter your body weight above to see the estimate.</div> : (
         <><CalorieBadge calories={cals} T={T}/>
           {cals && <div style={{ marginTop:"10px", display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:"8px" }}>
@@ -697,7 +803,7 @@ export default function TabApp() {
   const [timerDistance, setTimerDistance] = useState(10);   // planned km, used in manual mode
   const [selectedTip, setSelectedTip]   = useState(null);
   const isoToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
-  const BLANK_LOG = () => ({ date:isoToday(), distance:"", time:"", bergenKg:10, terrain:"", weather:"", effort:0, finish:"", freeNotes:"", progKey:null });
+  const BLANK_LOG = (type="tab") => ({ type, date:isoToday(), distance:"", time:"", bergenKg:10, terrain:"", weather:"", effort:0, finish:"", freeNotes:"", progKey:null });
   const [logForm, setLogForm]           = useState(BLANK_LOG);
   const [showLogForm, setShowLogForm]   = useState(false);
   const [userBodyWeight, setUserBodyWeight] = useState("");  // always kg
@@ -708,7 +814,7 @@ export default function TabApp() {
 
   // Timer is timestamp-based: elapsed = accumulated seconds + (now − startedAt).
   // That keeps it correct if the phone locks or the app is closed and reopened mid-tab.
-  const TIMER_IDLE = { running:false, startedAt:null, accum:0, gpsKm:0, mode:"gps", progKey:null, route:[], cued:0, lastCueSec:0, targetPace:null };
+  const TIMER_IDLE = { running:false, startedAt:null, accum:0, gpsKm:0, mode:"gps", kind:"tab", progKey:null, route:[], cued:0, lastCueSec:0, targetPace:null };
   const [routes, setRoutes]     = useState({});    // session id → recorded GPS route
   const [detailId, setDetailId] = useState(null);  // session open in the detail sheet
   const [timer, setTimer]       = useState(TIMER_IDLE);
@@ -717,7 +823,8 @@ export default function TabApp() {
   const watchIdRef  = useRef(null);
   const lastPtRef   = useRef(null);
   const wakeLockRef = useRef(null);
-  const gpsSupported = typeof navigator !== "undefined" && "geolocation" in navigator;
+  const retryGpsRef = useRef(false);   // set when we send someone to Settings to switch location on
+  const gpsSupported = isNative || (typeof navigator !== "undefined" && "geolocation" in navigator);
 
   // ── Load persisted data on mount ───────────────────────────────────────────
   useEffect(() => {
@@ -765,6 +872,7 @@ export default function TabApp() {
 
   // ── Persist on change ──────────────────────────────────────────────────────
   useEffect(() => { if (ready) store.set("tt_theme",     theme); },             [theme, ready]);
+  useEffect(() => { setStatusBar(THEMES[theme].scheme); }, [theme]);
   useEffect(() => { if (ready) store.set("tt_logs",      JSON.stringify(sessionLogs)); },   [sessionLogs, ready]);
   useEffect(() => { if (ready) store.set("tt_completed", JSON.stringify(completedSessions)); }, [completedSessions, ready]);
   useEffect(() => { if (ready) store.set("tt_profile",   JSON.stringify(profile)); }, [profile, ready]);
@@ -778,7 +886,13 @@ export default function TabApp() {
   useEffect(() => {
     if (!timer.running) return;
     const id = setInterval(() => setTick(t => t+1), 1000);
-    const onVis = () => { setTick(t => t+1); if (document.visibilityState === "visible") requestWakeLock(); };
+    const onVis = () => {
+      setTick(t => t+1);
+      if (document.visibilityState !== "visible") return;
+      requestWakeLock();
+      // Back from Settings after allowing location: restart GPS.
+      if (retryGpsRef.current && timer.mode === "gps") { retryGpsRef.current = false; clearGpsWatch(); lastPtRef.current = null; startGps(); }
+    };
     document.addEventListener("visibilitychange", onVis);
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVis); };
   }, [timer.running]); // eslint-disable-line
@@ -812,22 +926,29 @@ export default function TabApp() {
     if (watchIdRef.current !== null) return;
     lastPtRef.current = null;
     setGps(g => ({ ...g, state:"acquiring" }));
-    watchIdRef.current = navigator.geolocation.watchPosition(onPosition, onGpsError, { enableHighAccuracy:true, maximumAge:0, timeout:20000 });
+    watchIdRef.current = isNative
+      ? startNativeGps(onPosition, onGpsError)   // store apps: keeps tracking with the screen locked
+      : navigator.geolocation.watchPosition(onPosition, onGpsError, { enableHighAccuracy:true, maximumAge:0, timeout:20000 });
+  };
+  const clearGpsWatch = () => {
+    const h = watchIdRef.current; watchIdRef.current = null;
+    if (h === null || h === undefined) return;
+    if (isNative) stopNativeGps(h); else if (gpsSupported) navigator.geolocation.clearWatch(h);
   };
   const stopGps = () => {
-    if (watchIdRef.current !== null && gpsSupported) navigator.geolocation.clearWatch(watchIdRef.current);
-    watchIdRef.current = null;
+    clearGpsWatch();
     lastPtRef.current = null;   // so a resume doesn't count the distance moved while paused
     setGps(g => ({ ...g, state:"idle" }));
   };
   // Resume GPS if the app was reopened mid-tab.
   useEffect(() => {
     if (ready && timer.running && timer.mode === "gps") startGps();
-    return () => { if (watchIdRef.current !== null && gpsSupported) navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; };
+    return () => clearGpsWatch();
   }, [ready, timer.running, timer.mode]); // eslint-disable-line
 
   // Keep the screen awake while tabbing (where the phone supports it) so GPS keeps running.
   const requestWakeLock = async () => {
+    if (isNative) return;   // the store apps track in the background, so the screen can sleep
     try { if ("wakeLock" in navigator && !wakeLockRef.current) { wakeLockRef.current = await navigator.wakeLock.request("screen"); wakeLockRef.current.addEventListener?.("release", () => { wakeLockRef.current = null; }); } } catch {}
   };
   const releaseWakeLock = () => { try { wakeLockRef.current?.release(); } catch {} wakeLockRef.current = null; };
@@ -837,7 +958,7 @@ export default function TabApp() {
     setTimer(t => ({ ...t, running:true, startedAt:Date.now() }));   // GPS starts via the effect above
     requestWakeLock();
     // Speaking inside the button press also unlocks speech on iPhone for the cues that follow.
-    if (profile.voiceCues) say(elapsedSec>0 ? "Resuming." : `Tab started.${targetPace&&timer.mode==="gps" ? ` Target pace, ${spoken(targetPace*60*(u.imp?MI_TO_KM:1))} per ${u.imp?"mile":"kilometre"}.` : ""}`);
+    if (profile.voiceCues) say(elapsedSec>0 ? "Resuming." : `${timer.kind==="run"?"Run":"Tab"} started.${targetPace&&timer.mode==="gps" ? ` Target pace, ${spoken(targetPace*60*(u.imp?MI_TO_KM:1))} per ${u.imp?"mile":"kilometre"}.` : ""}`);
   };
   const pauseTimer = () => {
     setTimer(t => ({ ...t, running:false, startedAt:null, accum: t.accum + (t.startedAt ? (Date.now()-t.startedAt)/1000 : 0) }));
@@ -847,7 +968,7 @@ export default function TabApp() {
   const resetTimer = (ask=true) => {
     if (ask && elapsedSec > 0 && !window.confirm("Reset the timer? This session won't be saved.")) return;
     stopGps(); releaseWakeLock();
-    setTimer(t => ({ ...TIMER_IDLE, mode:t.mode, targetPace:t.targetPace }));
+    setTimer(t => ({ ...TIMER_IDLE, mode:t.mode, kind:t.kind, targetPace:t.targetPace }));
   };
 
   // ── Rest day awareness ─────────────────────────────────────────────────────
@@ -873,7 +994,8 @@ export default function TabApp() {
   const fmtTime = (sec) => { const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60; return h>0?`${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`:`${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`; };
   const timerKm       = timer.mode === "gps" ? timer.gpsKm : timerDistance;
   const currentPace   = elapsedSec>0 && timerKm>0.05 ? u.pace(elapsedSec/60/timerKm) : "--";
-  const liveCalories  = elapsedSec>0 && timerKm>0 ? calcCalories(bw,timerBergenKg,timerKm,elapsedSec/60) : null;
+  const timerLoad     = timer.kind==="run" ? 0 : timerBergenKg;
+  const liveCalories  = elapsedSec>0 && timerKm>0 ? calcCalories(bw,timerLoad,timerKm,elapsedSec/60,timer.kind) : null;
   const PROG          = getProgramme(profile.programme?.test, profile.programme?.level || profile.fitnessLevel);
   const pk            = (w,i) => `${PROG.id}|${w}-${i}`;
   const totalSess     = PROG.weeks.reduce((a,w)=>a+w.sessions.length,0);
@@ -918,7 +1040,7 @@ export default function TabApp() {
     const oldRank = getRank(before.total), newRank = getRank(after.total);
     toast(`+${gained} XP earned`,"xp");
     if (newRank.title !== oldRank.title) {
-      setTimeout(() => { setRankUp(newRank); try { navigator.vibrate?.([90,50,90,50,220]); } catch {} }, 500);
+      setTimeout(() => { setRankUp(newRank); celebrate(); }, 500);
     }
     let delay = 1200;
     const prevBadges = new Set(ALL_BADGES.filter(b=>b.check(sessionLogs)).map(b=>b.id));
@@ -945,7 +1067,8 @@ export default function TabApp() {
   const progSession = key => { const { prog, w, i } = parseProgKey(key); return prog.weeks[w-1]?.sessions[i]; };
   // Target pace (min per km) for live guidance: the linked programme session's, or one the user picked.
   const timerProgSess = timer.progKey ? progSession(timer.progKey) : null;
-  const targetPace = timerProgSess ? timerProgSess.targetTime/timerProgSess.distance : (timer.targetPace || null);
+  // Interval sessions have rests built in, so an average-pace target would mislead; they get none.
+  const targetPace = timerProgSess ? (timerProgSess.type==="Intervals" ? null : timerProgSess.targetTime/timerProgSess.distance) : (timer.targetPace || null);
   const unitKm = u.imp ? MI_TO_KM : 1;
   const paceGapSec = targetPace && timer.gpsKm >= 0.1 ? elapsedSec - timer.gpsKm*targetPace*60 : null;   // + = behind, − = ahead
   const gapText = g => Math.abs(g) < 15 ? "on target pace" : `${mmss(Math.abs(g))} ${g<0?"ahead of":"behind"} target`;
@@ -967,12 +1090,13 @@ export default function TabApp() {
     return `${prog.id!==PROG.id ? prog.short+" · " : ""}Week ${w} · ${sess.day} ${sess.type}`; };
   const startProgSession = (key, sess) => {
     if (elapsedSec > 0 || timer.running) { toast("Finish or reset the current tab first.", "warn"); go("timer"); return; }
-    setTimerBergenKg(sess.weight); setTimerDistance(sess.distance);
-    setTimer(t => ({ ...t, progKey:key }));
+    if (sess.kind!=="run") setTimerBergenKg(sess.weight);
+    setTimerDistance(sess.distance);
+    setTimer(t => ({ ...t, progKey:key, kind:sess.kind==="run"?"run":"tab" }));
     go("timer");
   };
   const logProgSession = (key, sess) => {
-    setLogForm({ ...BLANK_LOG(), distance:String(u.distNum(sess.distance,1)), time:"", bergenKg:sess.weight, progKey:key });
+    setLogForm({ ...BLANK_LOG(sess.kind==="run"?"run":"tab"), distance:String(u.distNum(sess.distance,1)), time:"", bergenKg:sess.kind==="run"?10:sess.weight, progKey:key });
     setShowLogForm(true); go("log");
   };
   const nextProg = (() => {
@@ -994,8 +1118,8 @@ export default function TabApp() {
     const end = new Date(start); end.setDate(end.getDate()+6);
     const label = `${start.getDate()} ${start.toLocaleDateString("en-GB",{month:"short"})} – ${end.getDate()} ${end.toLocaleDateString("en-GB",{month:"short"})}`;
     return { logs, days, xp, streak, label,
-      tabs: logs.length, km: logs.reduce((a,l)=>a+(parseFloat(l.distance)||0),0), mins: logs.reduce((a,l)=>a+(parseFloat(l.time)||0),0),
-      heaviest: logs.reduce((a,l)=>Math.max(a,parseFloat(l.bergenKg)||0),0) };
+      sessions: logs.length, km: logs.reduce((a,l)=>a+(parseFloat(l.distance)||0),0), mins: logs.reduce((a,l)=>a+(parseFloat(l.time)||0),0),
+      heaviest: tabsOf(logs).reduce((a,l)=>Math.max(a,parseFloat(l.bergenKg)||0),0) };
   })();
   const shareWeek = async () => {
     const w = weekSummary;
@@ -1007,7 +1131,7 @@ export default function TabApp() {
       g.textAlign = "left";
       g.fillStyle = acc; g.font = `700 54px ${T.displayFont}`; g.fillText("TABBR", 80, 130);
       g.fillStyle = mut; g.font = `500 38px ${T.font}`; g.fillText(`${profile.name ? profile.name+"'s" : "My"} week · ${w.label}`, 80, 200);
-      const tiles = [[String(w.tabs), w.tabs===1?"tab":"tabs"], [trim(u.distNum(w.km,1)), `${u.dUnit} covered`], [mmss(w.mins*60), "time on feet"], [w.heaviest?u.wt(w.heaviest):"—", "heaviest load"], [`+${w.xp}`, "XP earned"], [String(w.streak), "week streak"]];
+      const tiles = [[String(w.sessions), w.sessions===1?"session":"sessions"], [trim(u.distNum(w.km,1)), `${u.dUnit} covered`], [mmss(w.mins*60), "time on feet"], [w.heaviest?u.wt(w.heaviest):"—", "heaviest load"], [`+${w.xp}`, "XP earned"], [String(w.streak), "week streak"]];
       tiles.forEach(([v,l],i)=>{ const x = 80 + (i%2)*480, y = 330 + Math.floor(i/2)*220;
         g.fillStyle = txt; g.font = `700 104px ${T.displayFont}`; g.fillText(v, x, y);
         g.fillStyle = mut; g.font = `500 36px ${T.font}`; g.fillText(l, x, y+56); });
@@ -1019,8 +1143,7 @@ export default function TabApp() {
       g.fillStyle = acc; g.font = `700 34px ${T.font}`; g.fillText(`${rank.title} · ${totalXP.toLocaleString()} XP`, 80, 1290);
       const blob = await new Promise(res => c.toBlob(res, "image/png"));
       const file = new File([blob], `tabbr-week-${isoToday()}.png`, { type:"image/png" });
-      if (navigator.canShare?.({ files:[file] })) { await navigator.share({ files:[file], text:`My TABBR week: ${w.tabs} tabs, ${u.dist(w.km)}.` }); return; }
-      const url = URL.createObjectURL(file); const a = document.createElement("a"); a.href = url; a.download = file.name; a.click(); setTimeout(()=>URL.revokeObjectURL(url), 2000);
+      await shareFile(file, `My TABBR week: ${w.sessions} session${w.sessions===1?"":"s"}, ${u.dist(w.km)}.`);
     } catch (e) { if (e?.name !== "AbortError") toast("Couldn't create the share image on this device.", "warn"); }
   };
 
@@ -1030,9 +1153,9 @@ export default function TabApp() {
     const json = JSON.stringify({ app:"TABBR", version:2, exported:new Date().toISOString(), data }, null, 2);
     const name = `tabbr-backup-${isoToday()}.json`;
     const file = new File([json], name, { type:"application/json" });
-    try { if (navigator.canShare?.({ files:[file] })) { await navigator.share({ files:[file], title:"TABBR backup" }); return; } } catch (e) { if (e?.name === "AbortError") return; }
-    const url = URL.createObjectURL(file); const a = document.createElement("a"); a.href = url; a.download = name; a.click(); setTimeout(()=>URL.revokeObjectURL(url), 2000);
-    toast("Backup saved", "xp", Download);
+    try { await shareFile(file, "TABBR backup"); }
+    catch (e) { if (e?.name !== "AbortError") toast("Couldn't save the backup on this device.", "warn"); return; }
+    if (!isNative && !navigator.canShare?.({ files:[file] })) toast("Backup saved", "xp", Download);
   };
   const importData = (file) => {
     if (!file) return;
@@ -1043,8 +1166,8 @@ export default function TabApp() {
         if (parsed.app !== "TABBR" || !parsed.data) throw new Error("not a backup");
         const n = JSON.parse(parsed.data.tt_logs || "[]").length;
         if (!window.confirm(`Restore this backup from ${new Date(parsed.exported).toLocaleDateString("en-GB")} (${n} sessions)?\n\nThis replaces everything currently in TABBR on this device.`)) return;
-        Object.keys(localStorage).filter(k=>k.startsWith("tt_")).forEach(k=>localStorage.removeItem(k));
-        Object.entries(parsed.data).forEach(([k,v])=>localStorage.setItem(k,v));
+        Object.keys(localStorage).filter(k=>k.startsWith("tt_")).forEach(k=>{ localStorage.removeItem(k); if (isNative) prefs.remove(k); });
+        Object.entries(parsed.data).forEach(([k,v])=>{ localStorage.setItem(k,v); if (isNative) prefs.set(k,v); });
         window.location.reload();
       } catch { toast("That file isn't a TABBR backup. Choose a file named tabbr-backup-….json.", "warn"); }
     };
@@ -1052,12 +1175,14 @@ export default function TabApp() {
   };
 
   const logDistKm = u.toKm(logForm.distance);
+  const logMins   = parseDuration(logForm.time);
+  const logLoad   = logForm.type==="run" ? 0 : logForm.bergenKg;
   const handleLogSubmit = () => {
-    if (!(logDistKm>0) || !(parseFloat(logForm.time)>0)) return;
-    const cals = calcCalories(bw,logForm.bergenKg,logDistKm,parseFloat(logForm.time));
+    if (!(logDistKm>0) || !(logMins>0)) return;
+    const cals = calcCalories(bw,logLoad,logDistKm,logMins,logForm.type);
     const [y,m,d] = (logForm.date || isoToday()).split("-");
-    addSession({ ...logForm, distance:logDistKm, calories:cals, notes:logForm.freeNotes, date:`${d}/${m}/${y}`, id:Date.now() });
-    setLogForm(BLANK_LOG());
+    addSession({ ...logForm, type:logForm.type||"tab", bergenKg:logLoad, time:Math.round(logMins*100)/100, distance:logDistKm, calories:cals, notes:logForm.freeNotes, date:`${d}/${m}/${y}`, id:Date.now() });
+    setLogForm(BLANK_LOG(logForm.type));
     setShowLogForm(false);
   };
 
@@ -1066,18 +1191,19 @@ export default function TabApp() {
       toast(timer.mode==="gps" ? "No GPS distance recorded yet — switch to Manual to enter it yourself." : "Enter a distance first.", "warn");
       return;
     }
-    const mins = Math.max(1, Math.round(elapsedSec/60));
-    const cals = calcCalories(bw,timerBergenKg,timerKm,mins);
+    const mins = Math.max(0.1, Math.round(elapsedSec/60*100)/100);   // keep the seconds: runs are timed to the second
+    const cals = calcCalories(bw,timerLoad,timerKm,mins,timer.kind);
     const id = Date.now();
     const route = timer.mode==="gps" && (timer.route||[]).some(sg=>sg.length>1) ? downsampleRoute(timer.route) : null;
     if (route) setRoutes(r => ({ ...r, [id]:route }));
-    addSession({ distance:timerKm, bergenKg:timerBergenKg, time:mins, calories:cals, notes: timer.mode==="gps" ? "GPS-tracked" : "Logged from timer", source:timer.mode, progKey:timer.progKey||null, hasRoute:!!route, date:today, id });
+    addSession({ type:timer.kind, distance:timerKm, bergenKg:timerLoad, time:mins, calories:cals, notes: timer.mode==="gps" ? "GPS-tracked" : "Logged from timer", source:timer.mode, progKey:timer.progKey||null, hasRoute:!!route, date:today, id });
     resetTimer(false);
     go("log");
   };
 
   const typeColor = t => t==="Recovery"||t==="Taper" ? T.warning : t==="TEST" ? T.danger : T.accent;
-  const sessCalories = sess => bw ? calcCalories(bw,sess.weight,sess.distance,sess.targetTime) : null;
+  const sessCalories = sess => bw ? calcCalories(bw,sess.weight,sess.distance,sess.targetTime,sess.kind) : null;
+  const sessLine = sess => sess.kind==="run" ? `${u.dist(sess.distance)} run` : `${u.dist(sess.distance)} with ${u.wt(sess.weight)}`;
 
   // ── Styles ─────────────────────────────────────────────────────────────────
   const hair = theme==="tabbr" ? "rgba(74,222,128,0.18)" : T.border;
@@ -1128,7 +1254,6 @@ export default function TabApp() {
   const backTo = (label, onClick) => (
     <button style={{ ...s.hit, justifyContent:"flex-start", gap:"2px", color:T.accent, fontFamily:T.font, fontSize:"0.9rem", fontWeight:600, marginLeft:"-8px", marginBottom:"4px" }} onClick={onClick}>{I(ChevronLeft,20)}{label}</button>
   );
-  const fontsHref = "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Serif+Display&family=Oswald:wght@500;600;700&family=Share+Tech+Mono&family=Barlow+Condensed:wght@600;700;900&display=swap";
   const globalCss = `
     html, body { margin:0; background:${T.bg}; }
     * { -webkit-tap-highlight-color: transparent; }
@@ -1163,7 +1288,6 @@ export default function TabApp() {
   // ── Loading splash (uses the saved theme, so no flash) ─────────────────────
   if (!ready) return (
     <div style={{ minHeight:"100vh", background:T.bg, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:T.font }}>
-      <link href={fontsHref} rel="stylesheet"/>
       <style>{globalCss}</style>
       <div style={{ textAlign:"center", color:T.accent }}>
         {I(Backpack,44)}
@@ -1218,8 +1342,7 @@ export default function TabApp() {
     };
     return (
       <div style={os.wrap}>
-        <link href={fontsHref} rel="stylesheet"/>
-        <style>{globalCss}</style>
+          <style>{globalCss}</style>
         <div key={onboardStep} style={{ ...os.card, animation:"fadeUp 0.35s ease" }}>
           <div style={{ display:"flex", justifyContent:"center", gap:"8px", marginBottom:"22px" }}>{STEPS.map((_,i)=><div key={i} style={os.dot(i===onboardStep,i<onboardStep)}/>)}</div>
           {onboardStep>0 && backTo("Back", ()=>setOnboardStep(st=>st-1))}
@@ -1314,8 +1437,7 @@ export default function TabApp() {
       g.fillStyle = acc; g.font = `700 36px ${T.font}`; g.fillText(`TABBR · ${totalXP.toLocaleString()} XP`, 540, 1020);
       const blob = await new Promise(res => c.toBlob(res, "image/png"));
       const file = new File([blob], `tabbr-${r.abbr.replace(/\s/g,"").toLowerCase()}.png`, { type:"image/png" });
-      if (navigator.canShare?.({ files:[file] })) { await navigator.share({ files:[file], text:`Promoted to ${r.title} on TABBR.` }); return; }
-      const url = URL.createObjectURL(file); const a = document.createElement("a"); a.href = url; a.download = file.name; a.click(); setTimeout(()=>URL.revokeObjectURL(url), 2000);
+      await shareFile(file, `Promoted to ${r.title} on TABBR.`);
     } catch (e) { if (e?.name !== "AbortError") toast("Couldn't create the share image on this device.", "warn"); }
   };
 
@@ -1361,8 +1483,8 @@ export default function TabApp() {
             <span style={{ fontWeight:700, fontSize:"0.86rem" }}>{sess.day}</span>
             <span style={s.badge(typeColor(sess.type))}>{sess.type}</span>
             <span style={{ color:T.accent, fontWeight:700, fontSize:"0.86rem" }}>{u.dist(sess.distance)}</span>
-            <span style={{ color:T.textMuted, fontSize:"0.82rem" }}>{u.wt(sess.weight)}</span>
-            <span style={{ color:T.textMuted, fontSize:"0.78rem" }}>~{sess.targetTime} min</span>
+            {sess.kind!=="run" && <span style={{ color:T.textMuted, fontSize:"0.82rem" }}>{u.wt(sess.weight)}</span>}
+            {sess.type!=="Intervals" && <span style={{ color:T.textMuted, fontSize:"0.78rem" }}>~{mmss(sess.targetTime*60)}</span>}
             {cals&&!compact&&<span style={s.badge(T.warning)}>{I(Flame,12)}{cals} kcal</span>}
           </div>
           {!compact&&<p style={{ color:T.textMuted, fontSize:"0.76rem", margin:0, lineHeight:1.45 }}>{sess.notes}</p>}
@@ -1387,7 +1509,6 @@ export default function TabApp() {
   // ── MAIN APP RENDER ───────────────────────────────────────────────────────
   return (
     <div style={s.app} className={theme==="tabbr"?"tabbr-app":""}>
-      <link href={fontsHref} rel="stylesheet"/>
       <style>{globalCss}</style>
 
       {/* Header */}
@@ -1455,7 +1576,7 @@ export default function TabApp() {
             </div>
             <div style={{ ...s.main, paddingBottom:"calc(32px + env(safe-area-inset-bottom))" }}>
               <div style={{ fontFamily:T.displayFont, fontSize:"2.6rem", color:T.accent, lineHeight:1 }}>{u.dist(log.distance,2)}</div>
-              <div style={{ color:T.textMuted, fontSize:"0.88rem", margin:"6px 0 16px" }}>with {u.wt(log.bergenKg)}{log.progKey?` · ${progLabel(log.progKey)}`:""}</div>
+              <div style={{ color:T.textMuted, fontSize:"0.88rem", margin:"6px 0 16px" }}>{isRun(log) ? "Run" : `Tab with ${u.wt(log.bergenKg)}`}{log.progKey?` · ${progLabel(log.progKey)}`:""}</div>
               <div style={s.statGrid}>
                 {[{num:mmss(log.time*60),lbl:"Time"},{num:log.distance>0?u.pace(log.time/log.distance).split(" ")[0]:"--",lbl:`min/${u.dUnit}`},{num:`+${calcSessionXP(log)}`,lbl:"XP"}].map((x,i)=>(
                   <div key={i} style={s.stat}><span style={s.statNum}>{x.num}</span><span style={s.statLbl}>{x.lbl}</span></div>
@@ -1519,9 +1640,9 @@ export default function TabApp() {
               </svg>
               <span style={{ width:"64px", height:"64px", borderRadius:"50%", border:"2px solid currentColor", display:"flex", alignItems:"center", justifyContent:"center" }}>{I(timerActiveNow?TimerIcon:Play,30)}</span>
               <span>
-                <span style={{ display:"block", fontFamily:T.displayFont, fontSize:"2rem", fontWeight:700, lineHeight:1.05 }}>{timerActiveNow?(timer.running?fmtTime(elapsedSec):"Tab paused"):"Start TAB"}</span>
+                <span style={{ display:"block", fontFamily:T.displayFont, fontSize:"2rem", fontWeight:700, lineHeight:1.05 }}>{timerActiveNow?(timer.running?fmtTime(elapsedSec):(timer.kind==="run"?"Run paused":"Tab paused")):(timer.kind==="run"?"Start run":"Start TAB")}</span>
                 <span style={{ display:"block", fontSize:"0.82rem", opacity:0.85, marginTop:"4px" }}>
-                  {timerActiveNow ? `${timer.mode==="gps"?u.dist(timer.gpsKm,2)+" · ":""}Tap to return to the timer` : `${timer.mode==="gps"?"GPS tracking":"Manual distance"} · ${u.wt(timerBergenKg)} bergen`}
+                  {timerActiveNow ? `${timer.mode==="gps"?u.dist(timer.gpsKm,2)+" · ":""}Tap to return to the timer` : `${timer.mode==="gps"?"GPS tracking":"Manual distance"} · ${timer.kind==="run"?"run, no bergen":`${u.wt(timerBergenKg)} bergen`}`}
                 </span>
               </span>
             </button>
@@ -1544,7 +1665,7 @@ export default function TabApp() {
             {profile.goal==="recruit" && PROG.test==="tabbr10" && (
               <div style={s.banner}>
                 <span style={{ color:T.accent }}>{I(Shield,20)}</span>
-                <div style={{ flex:1, fontSize:"0.84rem" }}>Training for a specific test? There are programmes for the Army RFT, P Company and Royal Marines.</div>
+                <div style={{ flex:1, fontSize:"0.84rem" }}>Training for a specific test? There are tabbing and running programmes for the Army, P Company and Royal Marines.</div>
                 <button style={{ ...s.btn(true), minHeight:"36px", padding:"0 12px" }} onClick={()=>{ setPicker({ test:"army_gcc", level:PROG.level }); go("programme"); }}>Choose</button>
               </div>
             )}
@@ -1557,7 +1678,7 @@ export default function TabApp() {
                 <div style={s.pBar}><div style={s.pFill(progPct)}/></div>
                 <button onClick={()=>go("programme")} style={{ background:"none", border:"none", padding:0, marginTop:"8px", color:T.textMuted, fontSize:"0.78rem", fontFamily:T.font, cursor:"pointer", textDecoration:"underline", textUnderlineOffset:"3px" }}>{PROG.short} · {LEVEL_INFO[PROG.level].label}</button>
                 <div style={{ margin:"8px 0 4px", fontWeight:700, fontSize:"0.95rem" }}>Week {nextProg.week} · {nextProg.sess.day} <span style={s.badge(typeColor(nextProg.sess.type))}>{nextProg.sess.type}</span></div>
-                <div style={{ color:T.textMuted, fontSize:"0.84rem", marginBottom:"4px" }}>{u.dist(nextProg.sess.distance)} with {u.wt(nextProg.sess.weight)} · target {nextProg.sess.targetTime} min</div>
+                <div style={{ color:T.textMuted, fontSize:"0.84rem", marginBottom:"4px" }}>{sessLine(nextProg.sess)}{nextProg.sess.type!=="Intervals" && ` · target ${mmss(nextProg.sess.targetTime*60)}`}</div>
                 <div style={{ color:T.textMuted, fontSize:"0.78rem", marginBottom:"12px", lineHeight:1.45 }}>{nextProg.sess.notes}</div>
                 <div style={{ display:"flex", gap:"8px" }}>
                   <button style={{ ...s.btn(true), flex:1 }} onClick={()=>startProgSession(nextProg.key,nextProg.sess)}>{I(Play,16)}Start</button>
@@ -1581,7 +1702,7 @@ export default function TabApp() {
               </div>
               {seg([["0","This week"],["1","Last week"]], String(weekOffset), v=>setWeekOffset(+v))}
               <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"10px 8px", marginTop:"-4px" }}>
-                {[[weekSummary.tabs, weekSummary.tabs===1?"tab":"tabs"],[u.distNum(weekSummary.km,1), `${u.dUnit} covered`],[mmss(weekSummary.mins*60),"time on feet"],[weekSummary.heaviest?u.wt(weekSummary.heaviest):"—","heaviest load"],[`+${weekSummary.xp}`,"XP earned"],[weekSummary.streak, "week streak"]].map(([v,l],i)=>(
+                {[[weekSummary.sessions, weekSummary.sessions===1?"session":"sessions"],[u.distNum(weekSummary.km,1), `${u.dUnit} covered`],[mmss(weekSummary.mins*60),"time on feet"],[weekSummary.heaviest?u.wt(weekSummary.heaviest):"—","heaviest load"],[`+${weekSummary.xp}`,"XP earned"],[weekSummary.streak, "week streak"]].map(([v,l],i)=>(
                   <div key={i}><div style={{ fontFamily:T.displayFont, fontSize:"1.35rem", lineHeight:1.1, color:T.text }}>{v}</div><div style={{ fontSize:"0.72rem", color:T.textMuted }}>{l}</div></div>
                 ))}
               </div>
@@ -1592,14 +1713,14 @@ export default function TabApp() {
                     <span style={{ fontSize:"0.66rem", color:T.textMuted }}>{"MTWTFSS"[i]}</span>
                   </div>); })}
               </div>
-              {weekSummary.tabs>0 && <button style={{ ...s.btn(false), width:"100%", marginTop:"10px" }} onClick={shareWeek}>{I(Share2,16)}Share {weekOffset===0?"this":"last"} week</button>}
+              {weekSummary.sessions>0 && <button style={{ ...s.btn(false), width:"100%", marginTop:"10px" }} onClick={shareWeek}>{I(Share2,16)}Share {weekOffset===0?"this":"last"} week</button>}
             </div>
 
             <XPBar xp={totalXP} T={T}/>
             <div style={{ height:"14px" }}/>
             <div style={{ fontSize:"0.8rem", color:T.textMuted, margin:"0 0 6px" }}>All time</div>
             <div style={s.statGrid}>
-              {[{num:sessionLogs.length,lbl:"Tabs logged"},{num:u.distNum(totalDist,1),lbl:`${u.dUnit} covered`},{num:totalCals>0?totalCals.toLocaleString():"--",lbl:"kcal burned"},{num:earnedBadges.size,lbl:"Badges"},{num:`${earnedMissions.size}/${MISSIONS.length}`,lbl:"Missions"},{num:progPct+"%",lbl:"Programme"}].map((x,i)=>(
+              {[{num:sessionLogs.length,lbl:"Sessions"},{num:u.distNum(totalDist,1),lbl:`${u.dUnit} covered`},{num:totalCals>0?totalCals.toLocaleString():"--",lbl:"kcal burned"},{num:earnedBadges.size,lbl:"Badges"},{num:`${earnedMissions.size}/${MISSIONS.length}`,lbl:"Missions"},{num:progPct+"%",lbl:"Programme"}].map((x,i)=>(
                 <div key={i} style={s.stat}><span style={s.statNum}>{x.num}</span><span style={s.statLbl}>{x.lbl}</span></div>
               ))}
             </div>
@@ -1632,11 +1753,11 @@ export default function TabApp() {
             <h1 style={s.h1}>Training programme</h1>
             <div style={{ ...s.card, border:`1px solid ${T.accent}` }}>
               <div style={{ ...s.row, alignItems:"flex-start" }}>
-                <span style={{ color:T.accent, marginTop:"2px" }}>{I(activeTest.official?Shield:ClipboardList,22)}</span>
+                <span style={{ color:T.accent, marginTop:"2px" }}>{I(PROG.kind==="run"?Rabbit:activeTest.official?Shield:ClipboardList,22)}</span>
                 <div style={{ flex:1 }}>
                   <div style={{ fontFamily:T.displayFont, fontSize:"1.1rem", lineHeight:1.2 }}>{PROG.name}</div>
                   <div style={{ display:"flex", gap:"6px", margin:"5px 0 8px", flexWrap:"wrap" }}>
-                    <span style={s.badge(T.accent)}>{LEVEL_INFO[PROG.level].label}</span>
+                    <span style={s.badge(T.accent)}>{LEVEL_INFO[PROG.level].label}{PROG.kind==="run"?` · target ${mmss(PROG.T*60)}`:""}</span>
                     <span style={s.badge(T.textMuted)}>8 weeks · {completedCnt}/{totalSess} done</span>
                   </div>
                   <p style={{ color:T.textMuted, fontSize:"0.8rem", margin:0, lineHeight:1.5 }}>{activeTest.desc}</p>
@@ -1646,14 +1767,18 @@ export default function TabApp() {
               {picker && (
                 <div style={{ marginTop:"14px", borderTop:`1px solid ${T.border}`, paddingTop:"14px" }}>
                   <label style={s.label}>What are you training for?</label>
+                  {[["tab","Tabbing"],["run","Running"]].map(([kind,heading])=>(
+                  <div key={kind}>
+                  <div style={{ fontSize:"0.8rem", fontWeight:700, color:T.textMuted, margin:"4px 0 8px", display:"flex", alignItems:"center", gap:"6px" }}>{I(kind==="run"?Rabbit:Backpack,15)}{heading}</div>
                   <div style={{ display:"grid", gap:"8px", marginBottom:"14px" }}>
-                    {Object.entries(TESTS).map(([id,t])=>{ const sel=picker.test===id; return (
+                    {Object.entries(TESTS).filter(([,t])=>(t.kind||"tab")===kind).map(([id,t])=>{ const sel=picker.test===id; return (
                       <button key={id} aria-pressed={sel} onClick={()=>setPicker(p=>({...p,test:id}))}
                         style={{ textAlign:"left", padding:"12px", borderRadius:"10px", border:`2px solid ${sel?T.accent:T.border}`, background:sel?T.accentBg:T.surface, color:T.text, cursor:"pointer", fontFamily:T.font }}>
                         <div style={{ fontWeight:700, fontSize:"0.88rem", color:sel?T.accent:T.text, display:"flex", alignItems:"center", gap:"6px" }}>{I(t.official?Shield:ClipboardList,15)}{t.name}</div>
                         <div style={{ fontSize:"0.76rem", color:T.textMuted, marginTop:"3px", lineHeight:1.45 }}>{t.desc}</div>
                       </button>); })}
                   </div>
+                  </div>))}
                   <label style={s.label}>Your level</label>
                   {seg(Object.entries(LEVEL_INFO).map(([id,l])=>[id,l.label]), picker.level, lv=>setPicker(p=>({...p,level:lv})))}
                   <p style={{ color:T.textMuted, fontSize:"0.76rem", margin:"-6px 0 12px", lineHeight:1.5 }}>Progress is kept for each programme, so you can switch back any time. Official standards change: confirm the current test with your unit or recruiter.</p>
@@ -1684,7 +1809,8 @@ export default function TabApp() {
             idle:        gpsSupported ? "GPS ready — starts when you press Start" : "GPS isn't available on this device",
             acquiring:   "Finding your position…",
             ok:          gps.acc!==null && gps.acc>MAX_ACCURACY_M ? `Weak signal (±${gps.acc}m) — waiting for a better fix` : `GPS locked (±${gps.acc}m)`,
-            denied:      "Location permission denied — allow it in Settings › Privacy › Location Services › Safari Websites, or switch to Manual",
+            denied:      isNative ? "Location permission is off for TABBR — tap Open Settings below, or switch to Manual"
+                                  : "Location permission denied — allow it in Settings › Privacy › Location Services › Safari Websites, or switch to Manual",
             error:       "GPS signal lost — still trying. The timer keeps running.",
             unavailable: "GPS isn't available on this device — switch to Manual",
           }[gps.state];
@@ -1696,21 +1822,23 @@ export default function TabApp() {
             {ps && (
               <div style={s.banner}>
                 <span style={{ color:T.accent }}>{I(ClipboardList,20)}</span>
-                <div style={{ flex:1, fontSize:"0.84rem" }}><strong>{progLabel(timer.progKey)}</strong><br/><span style={{ color:T.textMuted }}>Target {u.dist(ps.distance)} in {ps.targetTime} min. Ticks off when you save.</span></div>
+                <div style={{ flex:1, fontSize:"0.84rem" }}><strong>{progLabel(timer.progKey)}</strong><br/><span style={{ color:T.textMuted }}>{ps.type==="Intervals" ? ps.notes : `Target ${u.dist(ps.distance)} in ${mmss(ps.targetTime*60)}.`} Ticks off when you save.</span></div>
                 {canSwitch && <button aria-label="Unlink programme session" style={s.hit} onClick={()=>setTimer(t=>({...t,progKey:null}))}>{I(X,18)}</button>}
               </div>
             )}
             {bwBanner()}
             <div style={s.card}>
+              <label style={s.label}>Session</label>
+              {seg([["tab",<span key="t" style={{ display:"inline-flex", alignItems:"center", gap:"6px" }}>{I(Backpack,16)}Tab</span>],["run",<span key="r" style={{ display:"inline-flex", alignItems:"center", gap:"6px" }}>{I(Rabbit,16)}Run</span>]], timer.kind, k=>{ if (canSwitch) setTimer(t=>({...t,kind:k})); else toast("Reset the timer to switch between a tab and a run.","warn"); })}
               <label style={s.label}>Distance tracking</label>
               {seg([["gps",<span key="g" style={{ display:"inline-flex", alignItems:"center", gap:"6px" }}>{I(Satellite,16)}GPS</span>],["manual",<span key="m" style={{ display:"inline-flex", alignItems:"center", gap:"6px" }}>{I(PenLine,16)}Manual</span>]], timer.mode, m=>{ if (canSwitch) setTimer(t=>({...t,mode:m})); else toast("Reset the timer to change how distance is tracked.","warn"); })}
               {!isGps && <div style={{ marginBottom:"14px" }}><label style={s.label}>Distance ({u.dUnit})</label><UnitInput style={s.input} valueMetric={timerDistance} onChangeMetric={v=>setTimerDistance(parseFloat(v)||0)} {...dc}/></div>}
-              <WeightStepper value={timerBergenKg} onChange={setTimerBergenKg} label="Bergen weight" T={T} s={s} u={u}/>
+              {timer.kind!=="run" && <WeightStepper value={timerBergenKg} onChange={setTimerBergenKg} label="Bergen weight" T={T} s={s} u={u}/>}
               {isGps && (
                 <div style={{ display:"grid", gridTemplateColumns:"1fr auto", gap:"10px", alignItems:"end", marginTop:"14px" }}>
                   <div>
                     <label style={s.label} htmlFor="tgt-pace">Target pace {ps?"(from programme)":"(optional)"}</label>
-                    {ps ? <div style={{ ...s.input, display:"flex", alignItems:"center" }}>{u.pace(targetPace)}</div> : (
+                    {ps ? <div style={{ ...s.input, display:"flex", alignItems:"center", color:targetPace?T.text:T.textMuted }}>{targetPace ? u.pace(targetPace) : "None for intervals"}</div> : (
                       <select id="tgt-pace" style={s.input} value={timer.targetPace ? Math.round(timer.targetPace*60*unitKm/15)*15 : ""}
                         onChange={e=>setTimer(t=>({...t, targetPace: e.target.value ? (+e.target.value/60)/unitKm : null }))}>
                         <option value="">No target</option>
@@ -1726,7 +1854,8 @@ export default function TabApp() {
             {isGps && (
               <div role="status" style={{ display:"flex", alignItems:"center", gap:"8px", padding:"10px 12px", borderRadius:"8px", border:`1px solid ${gpsColour}`, background:T.surface, marginBottom:"12px", fontSize:"0.8rem", color:gpsColour }}>
                 <span style={{ width:"8px", height:"8px", borderRadius:"50%", background:gpsColour, flexShrink:0 }}/>
-                <span>{gpsMsg}</span>
+                <span style={{ flex:1 }}>{gpsMsg}</span>
+                {isNative && gps.state==="denied" && <button style={{ ...s.btn(false), minHeight:"36px", padding:"0 10px", flexShrink:0 }} onClick={()=>{ retryGpsRef.current = true; openLocationSettings(); }}>Open Settings</button>}
               </div>
             )}
             <div style={s.timerBox}>
@@ -1741,7 +1870,7 @@ export default function TabApp() {
               )}
               {isGps && liveSplits.filter(x=>x.full).length>0 && (() => { const f = liveSplits.filter(x=>x.full); const last = f[f.length-1]; return (
                 <div style={{ color:T.textMuted, fontSize:"0.8rem", marginTop:"8px" }}>{u.imp?"Mile":"Km"} {last.n}: {mmss(last.sec)}{f.length>1?` · best ${mmss(Math.min(...f.map(x=>x.sec)))}`:""}</div>); })()}
-              {elapsedSec>0&&timerKm>0&&<div style={{ color:T.textMuted, fontSize:"0.78rem", marginTop:"4px" }}>Est. XP: +{calcSessionXP({ distance:timerKm, bergenKg:timerBergenKg, time:elapsedSec/60, calories:liveCalories })}</div>}
+              {elapsedSec>0&&timerKm>0&&<div style={{ color:T.textMuted, fontSize:"0.78rem", marginTop:"4px" }}>Est. XP: +{calcSessionXP({ type:timer.kind, distance:timerKm, bergenKg:timerLoad, time:elapsedSec/60, calories:liveCalories })}</div>}
               {liveCalories&&<div style={{ marginTop:"14px" }}><CalorieBadge calories={liveCalories} T={T}/></div>}
             </div>
             {isGps && elapsedSec>0 && !timer.running && (
@@ -1751,7 +1880,7 @@ export default function TabApp() {
               </div>
             )}
             <div style={{ display:"flex", gap:"10px", justifyContent:"center", marginBottom:"16px", flexWrap:"wrap" }}>
-              <button style={s.tBtn(timer.running?T.warning:T.accent)} onClick={()=>timer.running?pauseTimer():startTimer()}>{I(timer.running?Pause:Play,18)}{timer.running?"Pause":elapsedSec>0?"Resume":"Start TAB"}</button>
+              <button style={s.tBtn(timer.running?T.warning:T.accent)} onClick={()=>timer.running?pauseTimer():startTimer()}>{I(timer.running?Pause:Play,18)}{timer.running?"Pause":elapsedSec>0?"Resume":timer.kind==="run"?"Start run":"Start TAB"}</button>
               {elapsedSec>0&&<button style={s.tBtn(T.danger)} onClick={()=>resetTimer(true)}>{I(RotateCcw,18)}Reset</button>}
               {elapsedSec>0&&!timer.running&&(
                 <button style={s.tBtn(T.accentLight)} onClick={saveTimerSession}>{I(Check,18)}Save & earn XP</button>
@@ -1760,7 +1889,9 @@ export default function TabApp() {
             {timer.running&&<div style={{ ...s.card, background:T.accentBg, border:`1px solid ${T.accent}`, textAlign:"center" }}><p style={{ color:T.accent, fontWeight:700, margin:0 }}>{theme==="military"?"ADVANCING TO BATTLE — KEEP MOVING":theme==="tabbr"?"// TABBING IN PROGRESS — MAINTAIN PACE":"Keep pushing — head up, arms swinging."}</p></div>}
             {isGps && (
               <div style={{ ...s.card, background:T.surfaceAlt }}>
-                <p style={{ color:T.textMuted, fontSize:"0.78rem", margin:0, lineHeight:1.6 }}><strong>For accurate GPS:</strong> keep TABBR open on screen while you tab. iPhones pause location for home-screen web apps when the screen locks or you switch apps. The timer keeps correct time either way, and TABBR fills in the straight-line gap when you come back, but winding routes will under-count. Check the distance before you save.</p>
+                {isNative
+                  ? <p style={{ color:T.textMuted, fontSize:"0.78rem", margin:0, lineHeight:1.6 }}><strong>Lock your phone and go.</strong> TABBR keeps tracking distance and speaking your splits in the background.{platform==="android" ? " You'll see a TABBR notification while it's tracking." : " You'll see a blue location indicator at the top of the screen while it's tracking."} For the best signal, choose <em>Allow While Using App</em> and keep <em>Precise Location</em> on.</p>
+                  : <p style={{ color:T.textMuted, fontSize:"0.78rem", margin:0, lineHeight:1.6 }}><strong>For accurate GPS:</strong> keep TABBR open on screen while you tab. iPhones pause location for home-screen web apps when the screen locks or you switch apps. The timer keeps correct time either way, and TABBR fills in the straight-line gap when you come back, but winding routes will under-count. Check the distance before you save.</p>}
               </div>
             )}
           </div>
@@ -1916,13 +2047,20 @@ export default function TabApp() {
 
         {tab==="progress" && progressView==="records" && (() => {
           const has = sessionLogs.length > 0;
-          const bestPace     = has ? sessionLogs.reduce((b,l)=>{ const p=l.distance>0?l.time/l.distance:999; return p<b.pace?{pace:p,log:l}:b; },{pace:999,log:null}) : null;
-          const bestDist     = has ? sessionLogs.reduce((b,l)=>parseFloat(l.distance)>parseFloat(b.distance||0)?l:b) : null;
-          const heaviest     = has ? sessionLogs.reduce((b,l)=>parseFloat(l.bergenKg)>parseFloat(b.bergenKg||0)?l:b) : null;
+          // Tab records only count tabs; runs have their own section.
+          const tabLogs = tabsOf(sessionLogs), runLogs = runsOf(sessionLogs);
+          const fastest = (logs, minKm) => logs.filter(l=>l.distance>=minKm).reduce((b,l)=>{ const p=paceOf(l); return (!b||p<b.pace)?{pace:p,log:l}:b; },null);
+          const bestPace     = fastest(tabLogs, 0.01);
+          const bestDist     = tabLogs.length ? tabLogs.reduce((b,l)=>parseFloat(l.distance)>parseFloat(b.distance||0)?l:b) : null;
+          const heaviest     = tabLogs.length ? tabLogs.reduce((b,l)=>parseFloat(l.bergenKg)>parseFloat(b.bergenKg||0)?l:b) : null;
+          const run2k = fastest(runLogs, 2), run5k = fastest(runLogs, 5), run10k = fastest(runLogs, 10);
+          const longestRun   = runLogs.length ? runLogs.reduce((b,l)=>parseFloat(l.distance)>parseFloat(b.distance||0)?l:b) : null;
+          const runKm        = runLogs.reduce((a,l)=>a+(parseFloat(l.distance)||0),0);
+          const loadOf = l => isRun(l) ? "run" : u.wt(l.bergenKg);
           const mostCals     = has ? sessionLogs.reduce((b,l)=>(l.calories||0)>(b.calories||0)?l:b) : null;
           const mostXP       = has ? sessionLogs.reduce((b,l)=>calcSessionXP(l)>calcSessionXP(b)?l:b) : null;
-          const best5k       = sessionLogs.filter(l=>l.distance>=5).reduce((b,l)=>{ const p=l.time/l.distance; return (!b||p<b.pace)?{pace:p,log:l}:b; },null);
-          const best10k      = sessionLogs.filter(l=>l.distance>=10).reduce((b,l)=>{ const p=l.time/l.distance; return (!b||p<b.pace)?{pace:p,log:l}:b; },null);
+          const best5k       = fastest(tabLogs, 5);
+          const best10k      = fastest(tabLogs, 10);
           const streak = (() => {
             if (!has) return 0;
             const days=[...new Set(sessionLogs.map(l=>l.date))].map(d=>parseDate(d).getTime()).sort((a,b)=>a-b);
@@ -1956,16 +2094,28 @@ export default function TabApp() {
                     <div style={{ fontFamily:T.displayFont, fontSize:"2.6rem", color:T.gold, lineHeight:1 }}>{sessionLogs.length}</div>
                     <div style={{ fontSize:"0.8rem", color:T.textMuted, marginTop:"4px" }}>tabs logged · {u.dist(totalDist)} · {totalCals>0?totalCals.toLocaleString()+" kcal":"no calorie data"}</div>
                   </div>
-                  <h2 style={s.h2}>{I(Zap,18,T.accent)}Performance records</h2>
+                  <h2 style={s.h2}>{I(Backpack,18,T.accent)}Tab records</h2>
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:"10px", marginBottom:"18px" }}>
                     {pb({ icon:Gauge, title:"Best pace", hi:true, value:bestPace?.log?u.pace(bestPace.pace):null, sub:bestPace?.log?`${u.dist(bestPace.log.distance)} · ${u.wt(bestPace.log.bergenKg)}`:null, date:bestPace?.log?.date })}
-                    {pb({ icon:Route, title:"Longest tab", hi:true, value:bestDist?u.dist(bestDist.distance):null, sub:bestDist?`${u.wt(bestDist.bergenKg)} · ${bestDist.time} min`:null, date:bestDist?.date })}
+                    {pb({ icon:Route, title:"Longest tab", hi:true, value:bestDist?u.dist(bestDist.distance):null, sub:bestDist?`${u.wt(bestDist.bergenKg)} · ${mmss(bestDist.time*60)}`:null, date:bestDist?.date })}
                     {pb({ icon:Backpack, title:"Heaviest bergen", hi:true, value:heaviest?u.wt(heaviest.bergenKg):null, sub:heaviest?`${u.dist(heaviest.distance)} tab`:null, date:heaviest?.date })}
-                    {pb({ icon:Flame, title:"Most calories", hi:true, value:mostCals?.calories?`${mostCals.calories.toLocaleString()} kcal`:null, sub:mostCals?.calories?`${u.dist(mostCals.distance)} · ${u.wt(mostCals.bergenKg)}`:null, date:mostCals?.date })}
-                    {pb({ icon:Zap, title:"Best XP session", hi:true, value:mostXP?`${calcSessionXP(mostXP)} XP`:null, sub:mostXP?`${u.dist(mostXP.distance)} · ${u.wt(mostXP.bergenKg)}`:null, date:mostXP?.date })}
+                    {pb({ icon:Flame, title:"Most calories", hi:true, value:mostCals?.calories?`${mostCals.calories.toLocaleString()} kcal`:null, sub:mostCals?.calories?`${u.dist(mostCals.distance)} · ${loadOf(mostCals)}`:null, date:mostCals?.date })}
+                    {pb({ icon:Zap, title:"Best XP session", hi:true, value:mostXP?`${calcSessionXP(mostXP)} XP`:null, sub:mostXP?`${u.dist(mostXP.distance)} · ${loadOf(mostXP)}`:null, date:mostXP?.date })}
                     {pb({ icon:CalendarCheck, title:"Longest streak", value:streak>0?`${streak} day${streak>1?"s":""}`:null, sub:"consecutive active days" })}
                   </div>
-                  <h2 style={s.h2}>{I(Flag,18,T.accent)}Distance benchmarks</h2>
+                  <h2 style={s.h2}>{I(Rabbit,18,T.accent)}Running records</h2>
+                  {runLogs.length===0 ? (
+                    <div style={{ ...s.card, color:T.textMuted, fontSize:"0.84rem" }}>No runs yet. Choose <strong>Run</strong> on the timer or when logging a session.</div>
+                  ) : (
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:"10px", marginBottom:"18px" }}>
+                    {pb({ icon:Zap, title:`Best pace, ${u.dist(2,1)}+ run`, hi:true, value:run2k?u.pace(run2k.pace):null, sub:run2k?`${u.dist(run2k.log.distance,2)} in ${mmss(run2k.log.time*60)}`:null, date:run2k?.log?.date })}
+                    {pb({ icon:Flag, title:`Best pace, ${u.dist(5,1)}+ run`, hi:true, value:run5k?u.pace(run5k.pace):null, sub:run5k?`${u.dist(run5k.log.distance,2)} in ${mmss(run5k.log.time*60)}`:null, date:run5k?.log?.date })}
+                    {pb({ icon:Route, title:`Best pace, ${u.dist(10,1)}+ run`, hi:true, value:run10k?u.pace(run10k.pace):null, sub:run10k?`${u.dist(run10k.log.distance,2)} in ${mmss(run10k.log.time*60)}`:null, date:run10k?.log?.date })}
+                    {pb({ icon:Map, title:"Longest run", hi:true, value:longestRun?u.dist(longestRun.distance):null, sub:longestRun?mmss(longestRun.time*60):null, date:longestRun?.date })}
+                    {pb({ icon:Rabbit, title:"Runs logged", value:String(runLogs.length), sub:`${u.dist(runKm)} in total` })}
+                  </div>
+                  )}
+                  <h2 style={s.h2}>{I(Flag,18,T.accent)}Tab distance benchmarks</h2>
                   <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px", marginBottom:"18px" }}>
                     {pb({ icon:Flag, title:`Best pace, ${u.dist(5,1)}+`, value:best5k?u.pace(best5k.pace):null, sub:best5k?`${u.wt(best5k.log.bergenKg)} bergen`:null, date:best5k?.log?.date })}
                     {pb({ icon:Map, title:`Best pace, ${u.dist(10,1)}+`, value:best10k?u.pace(best10k.pace):null, sub:best10k?`${u.wt(best10k.log.bergenKg)} bergen`:null, date:best10k?.log?.date })}
@@ -1973,34 +2123,42 @@ export default function TabApp() {
                   <h2 style={s.h2}>{I(Crosshair,18,T.accent)}{activeTest.short} benchmark</h2>
                   <div style={s.card}>
                     <p style={{ color:T.textMuted, fontSize:"0.78rem", margin:"0 0 4px", lineHeight:1.5 }}>{activeTest.desc}</p>
-                    {(PROG.test==="tabbr10" ? [{label:"Pass (sub 2:00)",target:120},{label:"Full marks (sub 1:45)",target:105}] : [{label:`Pass (under ${activeTest.T} min)`,target:activeTest.T}]).map((std,i)=>{
-                      const best=sessionLogs.filter(l=>l.distance>=activeTest.D*0.99&&l.bergenKg>=activeTest.L).reduce((b,l)=>(!b||l.time<b.time)?l:b,null);
+                    {(PROG.test==="tabbr10" ? [{label:"Pass (sub 2:00)",target:120},{label:"Full marks (sub 1:45)",target:105}]
+                      : PROG.test==="rm_pjft" ? [{label:"Run 1 (under 12:30)",target:12.5},{label:"Run 2 (under 10:00)",target:10}]
+                      : [{label:`${PROG.kind==="run"?"Your target":"Pass"} (under ${mmss(PROG.T*60)})`,target:PROG.T}]).map((std,i)=>{
+                      // For run tests, a longer run counts at its average pace over the test distance.
+                      const best = PROG.kind==="run"
+                        ? (()=>{ const f=fastest(runLogs, PROG.D*0.99); return f ? { time:f.pace*PROG.D, date:f.log.date } : null; })()
+                        : tabLogs.filter(l=>l.distance>=PROG.D*0.99&&l.bergenKg>=PROG.L).reduce((b,l)=>(!b||l.time<b.time)?l:b,null);
                       const done=best&&best.time<=std.target;
                       const pct2=best?Math.min(100,Math.round((std.target/best.time)*100)):0;
                       return <div key={i} style={{ padding:"12px 0", borderBottom:`1px solid ${T.border}` }}>
                         <div style={{ display:"flex", justifyContent:"space-between", marginBottom:"6px" }}>
                           <span style={{ fontSize:"0.86rem", fontWeight:600 }}>{std.label}</span>
-                          {done?<span style={s.badge(T.accent)}>{I(Check,12)}Achieved</span>:best?<span style={{ fontSize:"0.78rem", color:T.textMuted }}>Best: {best.time} min</span>:<span style={{ fontSize:"0.78rem", color:T.textMuted }}>No qualifying tab yet</span>}
+                          {done?<span style={s.badge(T.accent)}>{I(Check,12)}Achieved · {mmss(best.time*60)}</span>:best?<span style={{ fontSize:"0.78rem", color:T.textMuted }}>Best: {mmss(best.time*60)}</span>:<span style={{ fontSize:"0.78rem", color:T.textMuted }}>No qualifying {PROG.kind==="run"?"run":"tab"} yet</span>}
                         </div>
                         <div style={{ height:"6px", background:T.surfaceAlt, borderRadius:"3px", overflow:"hidden" }}><div style={{ height:"100%", width:`${pct2}%`, background:done?T.accent:T.warning, borderRadius:"3px" }}/></div>
-                        <div style={{ fontSize:"0.72rem", color:T.textMuted, marginTop:"3px" }}>{u.dist(activeTest.D)}+ · {u.wt(activeTest.L)}+ bergen required{activeTest.part2?` (part 1 of the test)`:""}</div>
+                        <div style={{ fontSize:"0.72rem", color:T.textMuted, marginTop:"3px" }}>{PROG.kind==="run" ? `${u.dist(PROG.D)}+ run; longer runs count at their average pace` : `${u.dist(PROG.D)}+ · ${u.wt(PROG.L)}+ bergen required${activeTest.part2?" (part 1 of the test)":""}`}</div>
                       </div>;
                     })}
                     <div style={{ paddingTop:"12px", fontSize:"0.76rem", color:T.textMuted, lineHeight:1.6 }}>
-                      <strong style={{ color:T.text }}>Official Army standards, for reference:</strong> the Ground Close Combat Role Fitness Test loaded march is 4km with 40kg in 50 min, then 2km with 25kg in 15 min. The Annual Fitness Test is 8 miles (12.9km), with 25kg for infantry. Standards change, so check the latest with your unit or recruiter.
+                      {PROG.kind==="run"
+                        ? <><strong style={{ color:T.text }}>Official run tests, for reference:</strong> the Army's run is 2km on a flat course after an 800m warm-up (the lowest entry standard has been reported as 11:15; many roles ask for faster). The Royal Marines pre-joining test is two 2.4km treadmill runs at 2%: under 12:30, then under 10:00 after a 1-minute rest. Standards change, so check the latest with your recruiter.</>
+                        : <><strong style={{ color:T.text }}>Official Army standards, for reference:</strong> the Ground Close Combat Role Fitness Test loaded march is 4km with 40kg in 50 min, then 2km with 25kg in 15 min. The Annual Fitness Test is 8 miles (12.9km), with 25kg for infantry. Standards change, so check the latest with your unit or recruiter.</>}
                     </div>
                   </div>
+                  {tabLogs.length>0 && <>
                   <h2 style={s.h2}>{I(TrendingUp,18,T.accent)}Recent form</h2>
                   <div style={s.card}>
-                    <p style={{ color:T.textMuted, fontSize:"0.78rem", margin:"0 0 12px" }}>Last {Math.min(5,sessionLogs.length)} sessions — pace (min/{u.dUnit})</p>
+                    <p style={{ color:T.textMuted, fontSize:"0.78rem", margin:"0 0 12px" }}>Last {Math.min(5,tabLogs.length)} tab{Math.min(5,tabLogs.length)===1?"":"s"} — pace per {u.dUnit}</p>
                     <div style={{ display:"flex", gap:"8px", alignItems:"flex-end", height:"70px" }}>
-                      {sessionLogs.slice(0,5).reverse().map((log,i,arr)=>{
+                      {tabLogs.slice(0,5).reverse().map((log,i,arr)=>{
                         const pace=log.distance>0?log.time/log.distance:0;
                         const all=arr.map(l=>l.distance>0?l.time/l.distance:0).filter(p=>p>0);
                         const minP=Math.min(...all),maxP=Math.max(...all),range=maxP-minP||1;
                         const h=pace>0?Math.round(((maxP-pace)/range)*70+30):30;
                         return <div key={i} style={{ flex:1, height:"100%", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"flex-end", gap:"3px" }}>
-                          <div style={{ fontSize:"0.64rem", color:pace===minP?T.accent:T.textMuted }}>{pace>0?(u.imp?pace/KM_TO_MI:pace).toFixed(1):"--"}</div>
+                          <div style={{ fontSize:"0.64rem", color:pace===minP?T.accent:T.textMuted }}>{pace>0?mmss((u.imp?pace/KM_TO_MI:pace)*60):"--"}</div>
                           <div style={{ width:"100%", height:`${h}%`, background:pace===minP?T.accent:T.surfaceAlt, border:`1px solid ${pace===minP?T.accent:T.border}`, borderRadius:"4px 4px 0 0", minHeight:"8px" }}/>
                           <div style={{ fontSize:"0.62rem", color:T.textMuted }}>{log.date.slice(0,5)}</div>
                         </div>;
@@ -2008,6 +2166,7 @@ export default function TabApp() {
                     </div>
                     <p style={{ color:T.textMuted, fontSize:"0.72rem", margin:"8px 0 0" }}>Taller bar = faster pace. Highlighted = best in this window.</p>
                   </div>
+                  </>}
                 </>
               )}
             </div>
@@ -2018,7 +2177,7 @@ export default function TabApp() {
         {tab==="log" && (
           <div>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:"10px", marginBottom:"18px" }}>
-              <div><h1 style={s.h1}>Session log</h1><p style={{ color:T.textMuted, fontSize:"0.88rem", margin:0 }}>Every tab earns XP. Every session builds the rank.</p></div>
+              <div><h1 style={s.h1}>Session log</h1><p style={{ color:T.textMuted, fontSize:"0.88rem", margin:0 }}>Every tab and run earns XP. Every session builds the rank.</p></div>
               {!showLogForm && <button style={{ ...s.btn(true), flexShrink:0 }} onClick={()=>{ setLogForm(BLANK_LOG()); setShowLogForm(true); }}>{I(Plus,16)}Log session</button>}
             </div>
             {bwBanner()}
@@ -2033,15 +2192,17 @@ export default function TabApp() {
                     <button aria-label="Unlink programme session" style={s.hit} onClick={()=>setLogForm(p=>({...p,progKey:null}))}>{I(X,16)}</button>
                   </div>
                 )}
+                {seg([["tab",<span key="t" style={{ display:"inline-flex", alignItems:"center", gap:"6px" }}>{I(Backpack,16)}Tab</span>],["run",<span key="r" style={{ display:"inline-flex", alignItems:"center", gap:"6px" }}>{I(Rabbit,16)}Run</span>]], logForm.type||"tab", k=>setLogForm(p=>({...p,type:k})))}
                 <div style={{ marginBottom:"12px" }}>
                   <label style={s.label} htmlFor="log-date">Date</label>
                   <input id="log-date" style={s.input} type="date" max={isoToday()} value={logForm.date} onChange={e=>setLogForm(p=>({...p,date:e.target.value||isoToday()}))}/>
                 </div>
                 <div style={s.formGrid}>
                   <div><label style={s.label} htmlFor="log-dist">Distance ({u.dUnit})</label><input id="log-dist" style={s.input} type="number" inputMode="decimal" value={logForm.distance} onChange={e=>setLogForm(p=>({...p,distance:e.target.value}))} placeholder={u.imp?"6":"10"}/></div>
-                  <div><label style={s.label} htmlFor="log-time">Time (minutes)</label><input id="log-time" style={s.input} type="number" inputMode="numeric" value={logForm.time} onChange={e=>setLogForm(p=>({...p,time:e.target.value}))} placeholder="105"/></div>
+                  <div><label style={s.label} htmlFor="log-time">Time (mins or mm:ss)</label><input id="log-time" style={s.input} type="text" inputMode="decimal" autoComplete="off" value={logForm.time} onChange={e=>setLogForm(p=>({...p,time:e.target.value}))} placeholder={logForm.type==="run"?"24:30":"1:45:00"}/></div>
                 </div>
-                <div style={{ marginBottom:"14px" }}><WeightStepper value={logForm.bergenKg} onChange={v=>setLogForm(p=>({...p,bergenKg:v}))} label="Bergen weight" T={T} s={s} u={u}/></div>
+                {logForm.type!=="run" && <div style={{ marginBottom:"14px" }}><WeightStepper value={logForm.bergenKg} onChange={v=>setLogForm(p=>({...p,bergenKg:v}))} label="Bergen weight" T={T} s={s} u={u}/></div>}
+                {logForm.time && !(logMins>0) && <div style={{ color:T.warning, fontSize:"0.78rem", margin:"-4px 0 10px" }}>Enter time as minutes (105), mm:ss (24:30) or h:mm:ss (1:45:00).</div>}
 
                 <div style={{ borderTop:`1px solid ${T.border}`, paddingTop:"14px", marginBottom:"14px" }}>
                   <div style={{ fontSize:"0.84rem", fontWeight:700, marginBottom:"12px" }}>Session notes <span style={{ fontWeight:400, color:T.textMuted }}>(optional)</span></div>
@@ -2084,11 +2245,11 @@ export default function TabApp() {
                   </div>
                 </div>
 
-                {bw>0&&logDistKm>0&&logForm.time&&<div style={{ marginBottom:"12px" }}><CalorieBadge calories={calcCalories(bw,logForm.bergenKg,logDistKm,parseFloat(logForm.time))} T={T}/></div>}
-                {logDistKm>0&&logForm.time&&<div style={{ ...s.badge(T.gold), marginBottom:"12px", fontSize:"0.78rem", padding:"5px 10px" }}>Est. XP: +{calcSessionXP({ distance:logDistKm, bergenKg:logForm.bergenKg, time:parseFloat(logForm.time)||0, calories:calcCalories(bw,logForm.bergenKg,logDistKm,parseFloat(logForm.time)) })} (plus any missions or challenges)</div>}
+                {bw>0&&logDistKm>0&&logMins>0&&<div style={{ marginBottom:"12px" }}><CalorieBadge calories={calcCalories(bw,logLoad,logDistKm,logMins,logForm.type)} T={T}/></div>}
+                {logDistKm>0&&logMins>0&&<div style={{ ...s.badge(T.gold), marginBottom:"12px", fontSize:"0.78rem", padding:"5px 10px" }}>{u.pace(logMins/logDistKm)} · Est. XP: +{calcSessionXP({ type:logForm.type, distance:logDistKm, bergenKg:logLoad, time:logMins, calories:calcCalories(bw,logLoad,logDistKm,logMins,logForm.type) })} (plus any missions or challenges)</div>}
 
                 <div style={{ display:"flex", gap:"10px" }}>
-                  <button style={{ ...s.btn(true), flex:1, opacity:logDistKm>0&&parseFloat(logForm.time)>0?1:0.4 }} onClick={handleLogSubmit}>{I(Check,16)}Save & earn XP</button>
+                  <button style={{ ...s.btn(true), flex:1, opacity:logDistKm>0&&logMins>0?1:0.4 }} onClick={handleLogSubmit}>{I(Check,16)}Save & earn XP</button>
                   <button style={s.btn(false)} onClick={()=>setShowLogForm(false)}>Cancel</button>
                 </div>
               </div>
@@ -2111,8 +2272,8 @@ export default function TabApp() {
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ display:"flex", gap:"7px", flexWrap:"wrap", alignItems:"center", marginBottom:"4px" }}>
                         <span style={{ fontWeight:700, color:T.accent }}>{u.dist(log.distance,2)}</span>
-                        <span style={{ color:T.textMuted, fontSize:"0.82rem" }}>{u.wt(log.bergenKg)}</span>
-                        <span style={{ color:T.textMuted, fontSize:"0.82rem" }}>{log.time} min</span>
+                        {isRun(log) ? <span style={s.badge(T.accent)}>{I(Rabbit,11)}Run</span> : <span style={{ color:T.textMuted, fontSize:"0.82rem" }}>{u.wt(log.bergenKg)}</span>}
+                        <span style={{ color:T.textMuted, fontSize:"0.82rem" }}>{mmss(log.time*60)}</span>
                         {log.distance>0&&log.time>0&&<span style={s.badge(T.accent)}>{u.pace(log.time/log.distance)}</span>}
                         {log.source==="gps"&&<span style={s.badge(T.textMuted)}>{I(Satellite,11)}GPS</span>}
                         {log.calories&&<span style={s.badge(T.warning)}>{I(Flame,11)}{log.calories} kcal</span>}
@@ -2203,7 +2364,7 @@ export default function TabApp() {
             </div>
             <div style={s.card}>
               <h2 style={s.h2}>{I(Calculator,18,T.accent)}Session estimator</h2>
-              <CalcWidget T={T} s={s} u={u} userBodyWeight={userBodyWeight}/>
+              <CalcWidget T={T} s={s} u={u} userBodyWeight={userBodyWeight} seg={seg}/>
             </div>
             {bw>0&&(
               <div style={s.card}>

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TABBR</string>
+    <string name="title_activity_main">TABBR</string>
+    <string name="package_name">com.tabbr.fitness</string>
+    <string name="custom_url_scheme">com.tabbr.fitness</string>
+</resources>

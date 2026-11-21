@@ -1,0 +1,13 @@
+{
+  "appId": "com.tabbr.fitness",
+  "appName": "TABBR",
+  "webDir": "dist",
+  "backgroundColor": "#0a0c0a",
+  "android": {
+    "useLegacyBridge": true,
+    "adjustMarginsForEdgeToEdge": "force"
+  },
+  "ios": {
+    "contentInset": "never"
+  }
+}
